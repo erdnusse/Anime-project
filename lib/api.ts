@@ -204,27 +204,73 @@ export async function getMangaById(id: string): Promise<Manga> {
   }
 }
 
-export async function getChapterList(mangaId: string): Promise<Chapter[]> {
+export async function getChapterList(
+  mangaId: string,
+  progressCallback?: (progress: number) => void,
+): Promise<Chapter[]> {
   logger.info(`Fetching chapter list for manga ID: ${mangaId}`)
   try {
     const headers = await getAuthHeaders()
-    const response = await fetch(
-      `${API_BASE_URL}/manga/${mangaId}/feed?translatedLanguage[]=en&order[chapter]=desc&limit=100`,
-      { headers },
-    )
+    let allChapters: Chapter[] = []
+    let offset = 0
+    let hasMoreChapters = true
+    let totalChapters = 0
+    let totalFetched = 0
+    const limit = 100 // Number of chapters per request
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(
-        `Failed to fetch chapters for manga ID ${mangaId}: ${response.status} ${response.statusText}`,
-        errorText,
+    // Loop until we've fetched all chapters
+    while (hasMoreChapters) {
+      logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
+
+      const response = await fetch(
+        `${API_BASE_URL}/manga/${mangaId}/feed?translatedLanguage[]=en&order[chapter]=desc&limit=${limit}&offset=${offset}`,
+        { headers },
       )
-      throw new Error(`Failed to fetch chapters for manga ID: ${mangaId}`)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        logger.error(
+          `Failed to fetch chapters for manga ID ${mangaId}: ${response.status} ${response.statusText}`,
+          errorText,
+        )
+        throw new Error(`Failed to fetch chapters for manga ID: ${mangaId}`)
+      }
+
+      const data = await response.json()
+      const chapters = data.data
+
+      // Get the total number of chapters from the first response
+      if (offset === 0) {
+        totalChapters = data.total || 0
+        logger.info(`Total chapters available: ${totalChapters}`)
+      }
+
+      // Add this batch to our collection
+      allChapters = [...allChapters, ...chapters]
+      totalFetched += chapters.length
+
+      // Report progress if callback is provided
+      if (progressCallback && totalChapters > 0) {
+        const progress = Math.min(Math.round((totalFetched / totalChapters) * 100), 100)
+        progressCallback(progress)
+      }
+
+      logger.debug(`Fetched ${chapters.length} chapters, total so far: ${totalFetched}/${totalChapters}`)
+
+      // Check if we need to fetch more chapters
+      if (chapters.length < limit || totalFetched >= totalChapters) {
+        hasMoreChapters = false
+      } else {
+        // Prepare for next batch
+        offset += limit
+
+        // Add a small delay to avoid rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
     }
 
-    const data = await response.json()
-    logger.debug(`Chapter list for manga ID ${mangaId} fetched successfully`, { count: data.data.length })
-    return data.data
+    logger.debug(`Chapter list for manga ID ${mangaId} fetched successfully`, { count: allChapters.length })
+    return allChapters
   } catch (error) {
     logger.error(`Error in getChapterList for manga ID ${mangaId}`, error)
     throw error

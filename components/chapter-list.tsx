@@ -8,28 +8,41 @@ import { Calendar, RefreshCw } from "lucide-react"
 import logger from "@/lib/logger"
 import type { Chapter } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Progress } from "@/components/ui/progress"
 
 export default function ChapterList({ mangaId }: { mangaId: string }) {
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [retryCount, setRetryCount] = useState(0)
+  const [loadingProgress, setLoadingProgress] = useState(0)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
 
   useEffect(() => {
     async function loadChapters() {
       try {
         setLoading(true)
         setError(null)
+        setLoadingProgress(0)
         logger.info(`Loading chapters for manga ID: ${mangaId}`)
 
-        const chapterList = await getChapterList(mangaId)
+        const chapterList = await getChapterList(mangaId, (progress) => {
+          setLoadingProgress(progress)
+          // If we're past the first batch, show the "loading more" indicator
+          if (progress > 0 && progress < 100) {
+            setIsLoadingMore(true)
+          }
+        })
+
         setChapters(chapterList)
         setLoading(false)
+        setIsLoadingMore(false)
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load chapters for manga ID: ${mangaId}`, err)
         setError(`Failed to load chapters. ${errorMessage}`)
         setLoading(false)
+        setIsLoadingMore(false)
       }
     }
 
@@ -41,7 +54,7 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
     setRetryCount((prev) => prev + 1)
   }
 
-  if (loading) {
+  if (loading && !isLoadingMore) {
     return <ChapterListSkeleton />
   }
 
@@ -57,7 +70,7 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
     )
   }
 
-  if (chapters.length === 0) {
+  if (chapters.length === 0 && !loading) {
     return (
       <div className="text-center py-12">
         <p className="text-muted-foreground">No chapters available</p>
@@ -67,6 +80,16 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
 
   return (
     <div className="space-y-2">
+      {isLoadingMore && (
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm text-muted-foreground">Loading more chapters...</span>
+            <span className="text-sm text-muted-foreground">{loadingProgress}%</span>
+          </div>
+          <Progress value={loadingProgress} className="h-2" />
+        </div>
+      )}
+
       {chapters.map((chapter) => {
         const chapterNumber = getChapterNumber(chapter)
         const chapterTitle = getChapterTitle(chapter)
