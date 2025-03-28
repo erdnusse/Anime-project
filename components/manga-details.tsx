@@ -117,7 +117,7 @@ export default function MangaDetails({ id }: { id: string }) {
 
   const handleCancelDownload = () => {
     // In a real implementation, we would need to abort the fetch requests
-    // For now, we'll just close the modal
+    // For now, we'll just close the modal asd
     setIsDownloading(false)
     setDownloadProgress(null)
     setDownloadedZip(null)
