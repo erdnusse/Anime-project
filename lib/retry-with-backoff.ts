@@ -1,4 +1,5 @@
 import logger from "./logger"
+import connectionManager from "./connection-manager"
 
 interface RetryOptions {
   maxRetries: number
@@ -15,7 +16,11 @@ interface RetryOptions {
  * @param options Retry configuration options
  * @returns The result of the function
  */
-export async function retryWithBackoff<T>(fn: () => Promise<T>, options: RetryOptions): Promise<T> {
+export async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  options: RetryOptions,
+  url?: string, // Optional URL for connection management
+): Promise<T> {
   const {
     maxRetries,
     initialDelay,
@@ -26,11 +31,55 @@ export async function retryWithBackoff<T>(fn: () => Promise<T>, options: RetryOp
   } = options
 
   let attempt = 0
+  let useHttp1Fallback = false
 
   while (true) {
+    // If we have a URL and HTTP/2 has failed for this host before, use HTTP/1.1
+    if (url && connectionManager.hasHttp2Failed(url)) {
+      useHttp1Fallback = true
+    }
+
+    // If we have a URL, acquire a connection slot
+    let releaseConnection: (() => void) | undefined
+    if (url) {
+      releaseConnection = await connectionManager.acquireConnection(url)
+    }
+
     try {
-      return await fn()
-    } catch (error) {
+      // Modify the fetch options to use HTTP/1.1 if needed
+      const result = await fn()
+
+      // Release the connection slot if we acquired one
+      if (releaseConnection) {
+        releaseConnection()
+      }
+
+      return result
+    } catch (error: any) {
+      // Release the connection slot if we acquired one
+      if (releaseConnection) {
+        releaseConnection()
+      }
+
+      // Check if this is an HTTP/2 protocol error
+      const isHttp2Error =
+        error?.message?.includes("ERR_HTTP2_PROTOCOL_ERROR") ||
+        error?.message?.includes("HTTP/2") ||
+        error?.code === "ERR_HTTP2_PROTOCOL_ERROR"
+
+      // If this is an HTTP/2 error and we have a URL, mark this host
+      if (isHttp2Error && url) {
+        connectionManager.markHttp2Failed(url)
+        useHttp1Fallback = true
+
+        // For HTTP/2 errors, retry immediately with HTTP/1.1
+        if (attempt < maxRetries) {
+          logger.warn(`HTTP/2 protocol error detected, retrying with HTTP/1.1: ${error.message}`)
+          attempt++
+          continue
+        }
+      }
+
       attempt++
 
       // If we've reached max retries or the error isn't retryable, throw

@@ -1,6 +1,7 @@
 import logger from "./logger"
 import authService from "./auth-service"
 import { retryWithBackoff } from "./retry-with-backoff"
+import connectionManager from "./connection-manager"
 
 // MangaDex API types
 export interface Manga {
@@ -115,30 +116,64 @@ async function getAuthHeaders(): Promise<HeadersInit> {
  * Fetch with retry and proper error handling
  */
 async function fetchWithRetry(url: string, options?: RequestInit): Promise<Response> {
-  return retryWithBackoff(async () => {
-    console.log("URL:" + url);
-    console.log("Options: " + options?.headers);
-    const response = await fetch(url, options)
+  return retryWithBackoff(
+    async () => {
+      // Check if we should use HTTP/1.1 for this host
+      const useHttp1 = connectionManager.hasHttp2Failed(url)
 
-    // If the response is not ok, throw an error with status
-    if (!response.ok) {
-      const errorText = await response.text()
-      const error: any = new Error(`API request failed: ${response.status} ${response.statusText}`)
-      error.status = response.status
-      error.statusText = response.statusText
-      error.body = errorText
-      throw error
-    }
+      // Clone options and modify for HTTP/1.1 if needed
+      const fetchOptions: RequestInit = { ...options }
 
-    return response
-  }, DEFAULT_RETRY_OPTIONS)
+      if (useHttp1) {
+        // Force HTTP/1.1 by setting the appropriate header
+        fetchOptions.headers = {
+          ...(fetchOptions.headers || {}),
+          Connection: "keep-alive",
+          "X-Force-HTTP1": "1", // Some CDNs and proxies recognize this
+        }
+      }
+
+      try {
+        const response = await fetch(url, fetchOptions)
+
+        // If the response is not ok, throw an error with status
+        if (!response.ok) {
+          const errorText = await response.text()
+          const error: any = new Error(`API request failed: ${response.status} ${response.statusText}`)
+          error.status = response.status
+          error.statusText = response.statusText
+          error.body = errorText
+          throw error
+        }
+
+        return response
+      } catch (error: any) {
+        // Check if this is an HTTP/2 protocol error
+        if (
+          error?.message?.includes("ERR_HTTP2_PROTOCOL_ERROR") ||
+          error?.message?.includes("HTTP/2") ||
+          error?.code === "ERR_HTTP2_PROTOCOL_ERROR"
+        ) {
+          // Mark this host as having HTTP/2 issues
+          connectionManager.markHttp2Failed(url)
+
+          // Add more context to the error
+          error.message = `HTTP/2 protocol error for ${url}: ${error.message}`
+        }
+
+        throw error
+      }
+    },
+    DEFAULT_RETRY_OPTIONS,
+    url,
+  )
 }
 
 export async function getFeaturedManga(): Promise<Manga> {
   logger.info("Fetching featured manga")
   try {
     const headers = await getAuthHeaders()
-    console.log("Headers:" + headers)
+
     // For simplicity, we'll just get a random popular manga
     const response = await fetchWithRetry(
       `${API_BASE_URL}/manga?includes[]=cover_art&includes[]=author&order[followedCount]=desc&limit=1`,
@@ -173,7 +208,7 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
       default:
         url += "&order[relevance]=desc"
     }
-    console.log("Headers:" + headers)
+
     const response = await fetchWithRetry(url, { headers })
     const data = await response.json()
     logger.debug(`Manga list (${type}) fetched successfully`, { count: data.data.length })
