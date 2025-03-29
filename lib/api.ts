@@ -439,8 +439,26 @@ export async function getChapterList(
       }
     }
 
-    logger.debug(`Chapter list for manga ID ${mangaId} fetched successfully`, { count: allChapters.length })
-    return allChapters
+    // Sort chapters by chapter number in descending order
+    allChapters.sort((a, b) => {
+      // Convert chapter numbers to numeric values for proper sorting
+      const aNum = a.attributes.chapter ? Number.parseFloat(a.attributes.chapter) : 0
+      const bNum = b.attributes.chapter ? Number.parseFloat(b.attributes.chapter) : 0
+
+      // Sort in descending order (newest first)
+      return bNum - aNum
+    })
+
+    // Remove duplicate chapters by ID
+    const uniqueChapters = Array.from(new Map(allChapters.map((chapter) => [chapter.id, chapter])).values())
+
+    logger.debug(`Chapter list for manga ID ${mangaId} fetched successfully`, {
+      count: uniqueChapters.length,
+      originalCount: allChapters.length,
+      duplicatesRemoved: allChapters.length - uniqueChapters.length,
+    })
+
+    return uniqueChapters
   } catch (error) {
     logger.error(`Error in getChapterList for manga ID ${mangaId}`, error)
     throw error

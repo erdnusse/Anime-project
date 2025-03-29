@@ -90,14 +90,14 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
         </div>
       )}
 
-      {chapters.map((chapter) => {
+      {chapters.map((chapter, index) => {
         const chapterNumber = getChapterNumber(chapter)
         const chapterTitle = getChapterTitle(chapter)
         const publishDate = new Date(chapter.attributes.publishAt).toLocaleDateString()
 
         return (
           <div
-            key={chapter.id}
+            key={`${chapter.id}-${index}`}
             className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 transition-colors"
           >
             <div className="flex-1">
