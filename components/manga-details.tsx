@@ -70,9 +70,9 @@ export default function MangaDetails({ id }: { id: string }) {
 
     // Check if authenticated
     //if (!isAuthenticated) {
-     // setShowLoginForm(true)
+    // setShowLoginForm(true)
     // return
-   // }
+    // }
 
     const title = getTitle(manga)
     setIsDownloading(true)
@@ -131,23 +131,10 @@ export default function MangaDetails({ id }: { id: string }) {
   // Update the handleLogin function to accept username and password
   const handleLogin = async (username: string, password: string, clientId: string, clientSecret: string) => {
     try {
-      // Store credentials in localStorage for client-side use
-      localStorage.setItem("NEXT_PUBLIC_MANGADEX_CLIENT_ID", clientId)
-      localStorage.setItem("NEXT_PUBLIC_MANGADEX_CLIENT_SECRET", clientSecret)
+      // First set the client credentials
+      authService.setClientCredentials(clientId, clientSecret)
 
-      // Set environment variables for client-side
-      if (typeof window !== "undefined") {
-        ;(window as any).process = {
-          ...(window as any).process,
-          env: {
-            ...(window as any).process?.env,
-            NEXT_PUBLIC_MANGADEX_CLIENT_ID: clientId,
-            NEXT_PUBLIC_MANGADEX_CLIENT_SECRET: clientSecret,
-          },
-        }
-      }
-
-      // Try to authenticate with username and password
+      // Then try to authenticate
       const token = await authService.authenticate(username, password)
       const success = !!token
 

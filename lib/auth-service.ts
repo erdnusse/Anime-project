@@ -13,9 +13,11 @@ class AuthService {
   private tokens: AuthTokens | null = null
   private isRefreshing = false
   private refreshPromise: Promise<AuthTokens | null> | null = null
+  private clientId: string | null = null
+  private clientSecret: string | null = null
 
   constructor() {
-    // Only try to load tokens from localStorage in browser environment
+    // Only try to load tokens and credentials from localStorage in browser environment
     if (isBrowser) {
       try {
         const storedTokens = localStorage.getItem("mangadex_tokens")
@@ -23,9 +25,31 @@ class AuthService {
           this.tokens = JSON.parse(storedTokens)
           logger.info("Loaded auth tokens from storage")
         }
+
+        // Load client credentials
+        this.clientId = localStorage.getItem("MANGADEX_CLIENT_ID")
+        this.clientSecret = localStorage.getItem("MANGADEX_CLIENT_SECRET")
+
+        if (this.clientId && this.clientSecret) {
+          logger.info("Loaded client credentials from storage")
+        }
       } catch (error) {
-        logger.error("Failed to load auth tokens from storage", error)
+        logger.error("Failed to load auth data from storage", error)
       }
+    }
+  }
+
+  /**
+   * Set client credentials
+   */
+  setClientCredentials(clientId: string, clientSecret: string): void {
+    this.clientId = clientId
+    this.clientSecret = clientSecret
+
+    if (isBrowser) {
+      localStorage.setItem("MANGADEX_CLIENT_ID", clientId)
+      localStorage.setItem("MANGADEX_CLIENT_SECRET", clientSecret)
+      logger.info("Saved client credentials to storage")
     }
   }
 
@@ -38,10 +62,8 @@ class AuthService {
       return null
     }
 
-    // If we don't have tokens, authenticate
+    // If we don't have tokens, return null
     if (!this.tokens) {
-      // Don't try to authenticate automatically - return null
-      // Authentication will be triggered by user action
       return null
     }
 
@@ -59,8 +81,10 @@ class AuthService {
 
   /**
    * Authenticate with MangaDex API using username and password
+   * Following the documentation at:
+   * https://gitlab.com/mangadex-pub/mangadex-api-docs/-/blob/main/02-authentication/personal-clients.md
    */
-  async authenticate(username?: string, password?: string): Promise<AuthTokens | null> {
+  async authenticate(username: string, password: string): Promise<AuthTokens | null> {
     // Only authenticate in browser environment
     if (!isBrowser) {
       logger.error("Cannot authenticate on server side")
@@ -70,59 +94,40 @@ class AuthService {
     try {
       logger.info("Authenticating with MangaDex API")
 
-      // Get credentials from localStorage or parameters
-      const clientId = localStorage.getItem("NEXT_PUBLIC_MANGADEX_CLIENT_ID")
-      const clientSecret = localStorage.getItem("NEXT_PUBLIC_MANGADEX_CLIENT_SECRET")
-      const storedUsername = localStorage.getItem("MANGADEX_USERNAME")
-      const storedPassword = localStorage.getItem("MANGADEX_PASSWORD")
-
-      // Use provided credentials or stored ones
-      const finalUsername = username || storedUsername
-      const finalPassword = password || storedPassword
-
-      if (!clientId || !clientSecret) {
+      if (!this.clientId || !this.clientSecret) {
         logger.error("Missing MangaDex API client credentials")
-        throw new Error("Missing MangaDex API client credentials")
+        throw new Error("Missing MangaDex API client credentials. Please set client ID and secret first.")
       }
 
-      if (!finalUsername || !finalPassword) {
-        logger.error("Missing MangaDex username/password")
-        throw new Error("Missing MangaDex username/password")
-      }
-
-      // Store credentials if provided
-      if (username && password) {
-        localStorage.setItem("MANGADEX_USERNAME", username)
-        localStorage.setItem("MANGADEX_PASSWORD", password)
-      }
-
-      const response = await fetch("https://api.mangadex.org/auth/login", {
+      // Step 1: Get the auth token using client credentials
+      const tokenResponse = await fetch("https://api.mangadex.org/auth/token", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          username: finalUsername,
-          password: finalPassword,
-          client_id: clientId,
-          client_secret: clientSecret,
+          grant_type: "password",
+          username,
+          password,
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
         }),
       })
 
-      if (!response.ok) {
-        const errorData = await response.json()
+      if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.json()
         logger.error("Authentication failed", errorData)
-        throw new Error(`Authentication failed: ${response.status} ${response.statusText}`)
+        throw new Error(`Authentication failed: ${tokenResponse.status} ${tokenResponse.statusText}`)
       }
 
-      const data = await response.json()
+      const tokenData = await tokenResponse.json()
 
-      // Calculate expiration time (15 minutes from now)
-      const expiresAt = Date.now() + 15 * 60 * 1000
+      // Calculate expiration time (token expires in 15 minutes)
+      const expiresAt = Date.now() + tokenData.expires_in * 1000
 
       const tokens: AuthTokens = {
-        session: data.token.session,
-        refresh: data.token.refresh,
+        session: tokenData.access_token,
+        refresh: tokenData.refresh_token,
         expiresAt,
       }
 
@@ -169,8 +174,9 @@ class AuthService {
     }
 
     try {
-      if (!this.tokens?.refresh) {
-        return this.authenticate()
+      if (!this.tokens?.refresh || !this.clientId || !this.clientSecret) {
+        logger.error("Missing refresh token or client credentials")
+        return null
       }
 
       logger.info("Refreshing MangaDex API token")
@@ -181,24 +187,28 @@ class AuthService {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          token: this.tokens.refresh,
+          grant_type: "refresh_token",
+          refresh_token: this.tokens.refresh,
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
         }),
       })
 
       if (!response.ok) {
-        // If refresh fails, try to authenticate again
-        logger.warn("Token refresh failed, attempting full authentication")
-        return this.authenticate()
+        logger.warn("Token refresh failed, clearing tokens")
+        this.tokens = null
+        this.saveTokens()
+        return null
       }
 
       const data = await response.json()
 
-      // Calculate expiration time (15 minutes from now)
-      const expiresAt = Date.now() + 15 * 60 * 1000
+      // Calculate expiration time (token expires in 15 minutes)
+      const expiresAt = Date.now() + data.expires_in * 1000
 
       const tokens: AuthTokens = {
-        session: data.token.session,
-        refresh: data.token.refresh,
+        session: data.access_token,
+        refresh: data.refresh_token,
         expiresAt,
       }
 
@@ -210,9 +220,9 @@ class AuthService {
       return tokens
     } catch (error) {
       logger.error("Token refresh error", error)
-      // If refresh fails, clear tokens and try to authenticate again
       this.tokens = null
-      return this.authenticate()
+      this.saveTokens()
+      return null
     }
   }
 
@@ -220,9 +230,13 @@ class AuthService {
    * Save tokens to localStorage (client-side only)
    */
   private saveTokens(): void {
-    if (isBrowser && this.tokens) {
+    if (isBrowser) {
       try {
-        localStorage.setItem("mangadex_tokens", JSON.stringify(this.tokens))
+        if (this.tokens) {
+          localStorage.setItem("mangadex_tokens", JSON.stringify(this.tokens))
+        } else {
+          localStorage.removeItem("mangadex_tokens")
+        }
       } catch (error) {
         logger.error("Failed to save auth tokens to storage", error)
       }
@@ -236,8 +250,6 @@ class AuthService {
     this.tokens = null
     if (isBrowser) {
       localStorage.removeItem("mangadex_tokens")
-      localStorage.removeItem("MANGADEX_USERNAME")
-      localStorage.removeItem("MANGADEX_PASSWORD")
     }
     logger.info("Logged out from MangaDex API")
   }

@@ -35,7 +35,8 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
       }
     } catch (err) {
       logger.error("Login error", err)
-      setError("An error occurred during login. Please try again.")
+      const errorMessage = err instanceof Error ? err.message : "An error occurred during login. Please try again."
+      setError(errorMessage)
     } finally {
       setIsLoading(false)
     }
@@ -56,22 +57,25 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
             </Alert>
           )}
           <div className="space-y-2">
-            <Label htmlFor="username">Username</Label>
-            <Input id="username" value={username} onChange={(e) => setUsername(e.target.value)} required />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </div>
-          <div className="space-y-2">
             <Label htmlFor="client-id">Client ID</Label>
-            <Input id="client-id" value={clientId} onChange={(e) => setClientId(e.target.value)} required />
+            <Input
+              id="client-id"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              required
+              placeholder="Your MangaDex API client ID"
+            />
+            <p className="text-xs text-muted-foreground">
+              Create a client ID at{" "}
+              <a
+                href="https://api.mangadex.org/docs/02-authentication/personal-clients/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                MangaDex API
+              </a>
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="client-secret">Client Secret</Label>
@@ -81,6 +85,28 @@ export default function LoginForm({ onLogin }: LoginFormProps) {
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
               required
+              placeholder="Your MangaDex API client secret"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="username">Username</Label>
+            <Input
+              id="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              placeholder="Your MangaDex username"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              placeholder="Your MangaDex password"
             />
           </div>
           <Button type="submit" className="w-full" disabled={isLoading}>
