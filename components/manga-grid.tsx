@@ -1,3 +1,4 @@
+"use client"
 
 import Link from "next/link"
 import Image from "next/image"
@@ -6,14 +7,63 @@ import { Badge } from "@/components/ui/badge"
 import { getMangaList, getCoverImageUrl, getTitle } from "@/lib/api"
 import type { Manga } from "@/lib/api"
 import imagePreloader from "@/lib/image-preloader"
+import { useState, useEffect } from "react"
 
-export default async function MangaGrid({ type }: { type: string }) {
-  const mangaList = await getMangaList(type)
+export default function MangaGrid({ type }: { type: string }) {
+  const [mangaList, setMangaList] = useState<Manga[]>([])
+  const [error, setError] = useState<any>(null)
+  const [isLoading, setIsLoading] = useState(true)
 
-  if (mangaList.length === 0) {
+  useEffect(() => {
+    async function loadManga() {
+      try {
+        setIsLoading(true)
+        const data = await getMangaList(type)
+        console.log("Manga list data:", data)
+
+        // Check if relationships exist
+        data.forEach((manga, index) => {
+          const hasCoverArt = manga.relationships.some((rel) => rel.type === "cover_art" && rel.attributes)
+          console.log(`Manga ${index} (${manga.id}): Has cover art relationship: ${hasCoverArt}`)
+          if (!hasCoverArt) {
+            console.log("Missing cover art for:", manga)
+          }
+        })
+
+        setMangaList(data)
+      } catch (err) {
+        console.error(`Failed to load manga list (${type}):`, err)
+        setError(err)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadManga()
+  }, [type])
+
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        {Array(10)
+          .fill(0)
+          .map((_, i) => (
+            <Card key={i} className="overflow-hidden">
+              <div className="aspect-[2/3] bg-muted animate-pulse" />
+              <CardContent className="p-4">
+                <div className="h-4 bg-muted animate-pulse rounded mb-2" />
+                <div className="h-4 bg-muted animate-pulse rounded w-2/3" />
+              </CardContent>
+            </Card>
+          ))}
+      </div>
+    )
+  }
+
+  if (error || mangaList.length === 0) {
     return (
       <div className="text-center py-12">
-        <p className="text-muted-foreground">No manga found</p>
+        <p className="text-muted-foreground">{error ? `Error loading manga: ${error.message}` : "No manga found"}</p>
       </div>
     )
   }

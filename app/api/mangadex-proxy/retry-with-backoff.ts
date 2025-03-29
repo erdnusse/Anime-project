@@ -1,5 +1,5 @@
-import logger from "./logger"
-import connectionManager from "./connection-manager"
+import logger from "@/lib/logger"
+import connectionManager from "@/lib/connection-manager"
 
 interface RetryOptions {
   maxRetries: number
@@ -117,21 +117,6 @@ export async function retryWithBackoff<T>(
       // Wait for the calculated delay
       await new Promise((resolve) => setTimeout(resolve, delay))
     }
-  }
-}
-
-/**
- * Creates a function that will retry the provided function with exponential backoff
- * @param fn The function to wrap with retry logic
- * @param options Retry configuration options
- * @returns A function that will execute the original function with retry logic
- */
-export function withRetry<T extends (...args: any[]) => Promise<any>>(
-  fn: T,
-  options: RetryOptions,
-): (...args: Parameters<T>) => Promise<ReturnType<T>> {
-  return async (...args: Parameters<T>): Promise<ReturnType<T>> => {
-    return retryWithBackoff(() => fn(...args), options)
   }
 }
 

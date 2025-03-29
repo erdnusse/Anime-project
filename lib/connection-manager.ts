@@ -6,7 +6,7 @@ import logger from "./logger"
  */
 class ConnectionManager {
   private activeConnections: Map<string, number> = new Map()
-  private maxConnectionsPerHost = 6 // HTTP/2 typically allows 6 concurrent streams per connection
+  private maxConnectionsPerHost = 3 // Reduce from 6 to 3 to avoid rate limiting
   private connectionQueue: Map<string, Array<() => void>> = new Map()
   private http2FailedHosts: Set<string> = new Set()
 

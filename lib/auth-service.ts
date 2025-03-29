@@ -99,8 +99,8 @@ class AuthService {
         throw new Error("Missing MangaDex API client credentials. Please set client ID and secret first.")
       }
 
-      // Step 1: Get the auth token using client credentials
-      const tokenResponse = await fetch("https://api.mangadex.org/auth/token", {
+      // Step 1: Get the auth token using client credentials through our proxy
+      const tokenResponse = await fetch("/api/mangadex-proxy?path=/auth/token", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -181,7 +181,7 @@ class AuthService {
 
       logger.info("Refreshing MangaDex API token")
 
-      const response = await fetch("https://api.mangadex.org/auth/refresh", {
+      const response = await fetch("/api/mangadex-proxy?path=/auth/refresh", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

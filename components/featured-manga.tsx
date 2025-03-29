@@ -1,21 +1,37 @@
-
+"use client"
 import Link from "next/link"
 import Image from "next/image"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { BookOpen } from "lucide-react"
-import { getFeaturedManga, getCoverImageUrl, getTitle, getDescription } from "@/lib/api"
+import { getFeaturedManga, getCoverImageUrl, getTitle, getDescription, type Manga } from "@/lib/api"
 import imagePreloader from "@/lib/image-preloader"
+import { useState, useEffect } from "react"
 
-export default async function FeaturedManga() {
-  let manga
-  let error = null
+export default function FeaturedManga() {
+  const [manga, setManga] = useState<Manga | null>(null)
+  const [error, setError] = useState<Error | unknown | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
 
-  try {
-    manga = await getFeaturedManga()
-  } catch (err) {
-    error = err
-    console.error("Failed to load featured manga:", err)
+  useEffect(() => {
+    async function loadFeaturedManga() {
+      try {
+        setIsLoading(true)
+        const data = await getFeaturedManga()
+        setManga(data)
+      } catch (err) {
+        console.error("Failed to load featured manga:", err)
+        setError(err)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadFeaturedManga()
+  }, [])
+
+  if (isLoading) {
+    return <FeaturedMangaSkeleton />
   }
 
   if (error || !manga) {
