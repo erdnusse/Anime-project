@@ -1,5 +1,6 @@
 import logger from "./logger"
 import authService from "./auth-service"
+import { retryWithBackoff } from "./retry-with-backoff"
 
 // MangaDex API types
 export interface Manga {
@@ -73,6 +74,23 @@ const API_BASE_URL = "https://api.mangadex.org"
 // Check if we're in a browser environment
 const isBrowser = typeof window !== "undefined"
 
+// Default retry options for API requests
+const DEFAULT_RETRY_OPTIONS = {
+  maxRetries: 3,
+  initialDelay: 1000, // Start with 1 second
+  maxDelay: 15000, // Max delay of 15 seconds
+  factor: 2, // Double the delay each time
+  jitter: true, // Add randomness to prevent thundering herd
+  retryCondition: (error: any) => {
+    // Only retry on network errors or 5xx server errors
+    if (error.status && error.status >= 400 && error.status < 500) {
+      // Don't retry client errors (4xx) except for 429 (too many requests)
+      return error.status === 429
+    }
+    return true // Retry on network errors and 5xx
+  },
+}
+
 /**
  * Get authentication headers for API requests
  */
@@ -93,22 +111,39 @@ async function getAuthHeaders(): Promise<HeadersInit> {
   return headers
 }
 
+/**
+ * Fetch with retry and proper error handling
+ */
+async function fetchWithRetry(url: string, options?: RequestInit): Promise<Response> {
+  return retryWithBackoff(async () => {
+    console.log("URL:" + url);
+    console.log("Options: " + options?.headers);
+    const response = await fetch(url, options)
+
+    // If the response is not ok, throw an error with status
+    if (!response.ok) {
+      const errorText = await response.text()
+      const error: any = new Error(`API request failed: ${response.status} ${response.statusText}`)
+      error.status = response.status
+      error.statusText = response.statusText
+      error.body = errorText
+      throw error
+    }
+
+    return response
+  }, DEFAULT_RETRY_OPTIONS)
+}
+
 export async function getFeaturedManga(): Promise<Manga> {
   logger.info("Fetching featured manga")
   try {
     const headers = await getAuthHeaders()
-
+    console.log("Headers:" + headers)
     // For simplicity, we'll just get a random popular manga
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${API_BASE_URL}/manga?includes[]=cover_art&includes[]=author&order[followedCount]=desc&limit=1`,
       { headers },
     )
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(`Failed to fetch featured manga: ${response.status} ${response.statusText}`, errorText)
-      throw new Error(`Failed to fetch featured manga: ${response.status} ${response.statusText}`)
-    }
 
     const data = await response.json()
     logger.debug("Featured manga fetched successfully", { id: data.data[0]?.id })
@@ -138,15 +173,8 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
       default:
         url += "&order[relevance]=desc"
     }
-
-    const response = await fetch(url, { headers })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(`Failed to fetch manga list (${type}): ${response.status} ${response.statusText}`, errorText)
-      throw new Error(`Failed to fetch manga list: ${type}`)
-    }
-
+    console.log("Headers:" + headers)
+    const response = await fetchWithRetry(url, { headers })
     const data = await response.json()
     logger.debug(`Manga list (${type}) fetched successfully`, { count: data.data.length })
     return data.data
@@ -160,16 +188,10 @@ export async function searchManga(query: string): Promise<Manga[]> {
   logger.info(`Searching manga with query: ${query}`)
   try {
     const headers = await getAuthHeaders()
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${API_BASE_URL}/manga?title=${encodeURIComponent(query)}&includes[]=cover_art&includes[]=author&limit=20`,
       { headers },
     )
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(`Failed to search manga: ${response.status} ${response.statusText}`, errorText)
-      throw new Error("Failed to search manga")
-    }
 
     const data = await response.json()
     logger.debug(`Manga search for "${query}" completed successfully`, { count: data.data.length })
@@ -184,16 +206,10 @@ export async function getMangaById(id: string): Promise<Manga> {
   logger.info(`Fetching manga by ID: ${id}`)
   try {
     const headers = await getAuthHeaders()
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `${API_BASE_URL}/manga/${id}?includes[]=cover_art&includes[]=author&includes[]=artist`,
       { headers },
     )
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(`Failed to fetch manga with ID ${id}: ${response.status} ${response.statusText}`, errorText)
-      throw new Error(`Failed to fetch manga with ID: ${id}`)
-    }
 
     const data = await response.json()
     logger.debug(`Manga with ID ${id} fetched successfully`)
@@ -222,19 +238,10 @@ export async function getChapterList(
     while (hasMoreChapters) {
       logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
 
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${API_BASE_URL}/manga/${mangaId}/feed?translatedLanguage[]=en&order[chapter]=desc&limit=${limit}&offset=${offset}`,
         { headers },
       )
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        logger.error(
-          `Failed to fetch chapters for manga ID ${mangaId}: ${response.status} ${response.statusText}`,
-          errorText,
-        )
-        throw new Error(`Failed to fetch chapters for manga ID: ${mangaId}`)
-      }
 
       const data = await response.json()
       const chapters = data.data
@@ -281,13 +288,7 @@ export async function getChapterById(chapterId: string): Promise<Chapter> {
   logger.info(`Fetching chapter by ID: ${chapterId}`)
   try {
     const headers = await getAuthHeaders()
-    const response = await fetch(`${API_BASE_URL}/chapter/${chapterId}`, { headers })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(`Failed to fetch chapter with ID ${chapterId}: ${response.status} ${response.statusText}`, errorText)
-      throw new Error(`Failed to fetch chapter with ID: ${chapterId}`)
-    }
+    const response = await fetchWithRetry(`${API_BASE_URL}/chapter/${chapterId}`, { headers })
 
     const data = await response.json()
     logger.debug(`Chapter with ID ${chapterId} fetched successfully`)
@@ -302,16 +303,7 @@ export async function getChapterPages(chapterId: string): Promise<ChapterData> {
   logger.info(`Fetching pages for chapter ID: ${chapterId}`)
   try {
     const headers = await getAuthHeaders()
-    const response = await fetch(`${API_BASE_URL}/at-home/server/${chapterId}`, { headers })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      logger.error(
-        `Failed to fetch pages for chapter ID ${chapterId}: ${response.status} ${response.statusText}`,
-        errorText,
-      )
-      throw new Error(`Failed to fetch pages for chapter ID: ${chapterId}`)
-    }
+    const response = await fetchWithRetry(`${API_BASE_URL}/at-home/server/${chapterId}`, { headers })
 
     const data = await response.json()
     logger.debug(`Pages for chapter ID ${chapterId} fetched successfully`, {

@@ -1,9 +1,26 @@
 import { type NextRequest, NextResponse } from "next/server"
 import logger from "@/lib/logger"
 import authService from "@/lib/auth-service"
+import { retryWithBackoff } from "@/lib/retry-with-backoff"
 
 // Cache for storing image responses
 const CACHE_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
+
+// Retry options specifically for image fetching
+const IMAGE_RETRY_OPTIONS = {
+  maxRetries: 3,
+  initialDelay: 1000,
+  maxDelay: 10000,
+  factor: 2,
+  jitter: true,
+  retryCondition: (error: any) => {
+    // Only retry on network errors, 5xx errors, or 429 (too many requests)
+    if (error.status) {
+      return error.status === 429 || error.status >= 500
+    }
+    return true // Retry on network errors
+  },
+}
 
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url")
@@ -30,22 +47,22 @@ export async function GET(request: NextRequest) {
       headers["Authorization"] = `Bearer ${sessionToken}`
     }
 
-    // Fetch the image
-    const response = await fetch(url, {
-      headers,
-      cache: "force-cache", // Use built-in HTTP cache when possible
-    })
-
-    if (!response.ok) {
-      logger.error(`Failed to fetch image: ${url}`, {
-        status: response.status,
-        statusText: response.statusText,
+    // Fetch the image with retry logic
+    const response = await retryWithBackoff(async () => {
+      const res = await fetch(url, {
+        headers,
+        cache: "force-cache", // Use built-in HTTP cache when possible
       })
 
-      return new NextResponse(`Failed to fetch image: ${response.statusText}`, {
-        status: response.status,
-      })
-    }
+      if (!res.ok) {
+        const error: any = new Error(`Failed to fetch image: ${res.statusText}`)
+        error.status = res.status
+        error.statusText = res.statusText
+        throw error
+      }
+
+      return res
+    }, IMAGE_RETRY_OPTIONS)
 
     const imageBuffer = await response.arrayBuffer()
     const contentType = response.headers.get("content-type") || "image/jpeg"
