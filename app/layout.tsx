@@ -21,10 +21,13 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  // Check if environment variables are available
+  const clerkPubKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || ""
+
   return (
     <html lang="en">
       <body className={inter.className}>
-        <ClerkProvider>
+        <ClerkProvider publishableKey={clerkPubKey}>
           <header className="border-b">
             <div className="container mx-auto px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-6">
