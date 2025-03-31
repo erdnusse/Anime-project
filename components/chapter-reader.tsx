@@ -27,6 +27,7 @@ export default function ChapterReader({
   const pageRefs = useRef<(HTMLDivElement | null)[]>([])
   const observerRef = useRef<IntersectionObserver | null>(null)
   const scrollToTopRef = useRef<HTMLButtonElement | null>(null)
+  const [isForcingRefresh, setIsForcingRefresh] = useState(false)
 
   // Fetch chapter data
   useEffect(() => {
@@ -51,16 +52,18 @@ export default function ChapterReader({
         })
 
         setLoading(false)
+        setIsForcingRefresh(false) // Reset the force refresh flag
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load chapter: ${chapterId}`, err)
         setError(`Failed to load chapter. ${errorMessage}`)
         setLoading(false)
+        setIsForcingRefresh(false) // Reset the force refresh flag
       }
     }
 
     loadChapter()
-  }, [chapterId, retryCount])
+  }, [chapterId, retryCount, isForcingRefresh])
 
   // Preload images
   useEffect(() => {
@@ -178,6 +181,13 @@ export default function ChapterReader({
     setVisiblePages([])
   }
 
+  const handleForceRefresh = () => {
+    logger.info(`Force refreshing chapter: ${chapterId}`)
+    setIsForcingRefresh(true)
+    setPreloadedImages({})
+    setVisiblePages([])
+  }
+
   // Function to get proxied image URL
   const getProxiedImageUrl = (page: string) => {
     try {
@@ -221,7 +231,20 @@ export default function ChapterReader({
 
   return (
     <div className="flex flex-col items-center">
-      <h2 className="text-xl font-semibold mb-6 text-center">{title}</h2>
+      <div className="w-full flex justify-between items-center mb-6">
+        <h2 className="text-xl font-semibold text-center">{title}</h2>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleForceRefresh}
+          disabled={loading}
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
       <div className="space-y-4 w-full max-w-3xl mx-auto">
         {pages.length === 0 ? (
           <div className="text-center py-12">

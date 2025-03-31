@@ -17,6 +17,7 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
   const [retryCount, setRetryCount] = useState(0)
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [isForcingRefresh, setIsForcingRefresh] = useState(false)
 
   useEffect(() => {
     async function loadChapters() {
@@ -26,32 +27,43 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
         setLoadingProgress(0)
         logger.info(`Loading chapters for manga ID: ${mangaId}`)
 
-        const chapterList = await getChapterList(mangaId, (progress) => {
-          setLoadingProgress(progress)
-          // If we're past the first batch, show the "loading more" indicator
-          if (progress > 0 && progress < 100) {
-            setIsLoadingMore(true)
-          }
-        })
+        const chapterList = await getChapterList(
+          mangaId,
+          (progress) => {
+            setLoadingProgress(progress)
+            // If we're past the first batch, show the "loading more" indicator
+            if (progress > 0 && progress < 100) {
+              setIsLoadingMore(true)
+            }
+          },
+          isForcingRefresh, // Pass the force refresh flag
+        )
 
         setChapters(chapterList)
         setLoading(false)
         setIsLoadingMore(false)
+        setIsForcingRefresh(false) // Reset the force refresh flag
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load chapters for manga ID: ${mangaId}`, err)
         setError(`Failed to load chapters. ${errorMessage}`)
         setLoading(false)
         setIsLoadingMore(false)
+        setIsForcingRefresh(false) // Reset the force refresh flag
       }
     }
 
     loadChapters()
-  }, [mangaId, retryCount])
+  }, [mangaId, retryCount, isForcingRefresh])
 
   const handleRetry = () => {
     logger.info(`Retrying chapter load for manga ID: ${mangaId}`)
     setRetryCount((prev) => prev + 1)
+  }
+
+  const handleForceRefresh = () => {
+    logger.info(`Force refreshing chapter list for manga ID: ${mangaId}`)
+    setIsForcingRefresh(true)
   }
 
   if (loading && !isLoadingMore) {
@@ -80,6 +92,20 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
 
   return (
     <div className="space-y-2">
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-xl font-semibold">Chapters ({chapters.length})</h2>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleForceRefresh}
+          disabled={loading || isLoadingMore}
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className={`h-4 w-4 ${isLoadingMore ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
+      </div>
+
       {isLoadingMore && (
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">

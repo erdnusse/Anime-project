@@ -1,5 +1,6 @@
 import axios from "axios"
 import logger from "./logger"
+import cacheManager from "./cache-manager"
 
 // MangaDex API types
 export interface Manga {
@@ -86,14 +87,27 @@ function buildApiUrl(path: string): string {
 }
 
 /**
- * Make an API request using axios
+ * Make an API request using axios with caching
  */
 async function apiRequest<T>(
   path: string,
   params: Record<string, any> = {},
   method: "GET" | "POST" = "GET",
   data?: any,
+  cacheType?: string, // Simplified type to fix the TypeScript error
+  forceFresh = false,
 ): Promise<T> {
+  // Generate a cache key based on the request
+  const cacheKey = `${path}_${JSON.stringify(params)}_${method}`
+
+  // Check cache first if it's a GET request and we're not forcing fresh data
+  if (method === "GET" && !forceFresh && cacheType) {
+    const cachedData = cacheManager.get<T>(cacheKey, cacheType as any)
+    if (cachedData) {
+      return cachedData
+    }
+  }
+
   const url = buildApiUrl(path)
 
   try {
@@ -105,6 +119,11 @@ async function apiRequest<T>(
       params: method === "GET" ? { params: JSON.stringify(params) } : undefined,
       data: method === "POST" ? data : undefined,
     })
+
+    // Cache the response if it's a GET request
+    if (method === "GET" && cacheType) {
+      cacheManager.set(cacheKey, response.data, cacheType as any)
+    }
 
     return response.data
   } catch (error: any) {
@@ -125,11 +144,17 @@ async function apiRequest<T>(
 export async function getFeaturedManga(): Promise<Manga> {
   logger.info("Fetching featured manga")
   try {
-    const data = await apiRequest<any>("/manga", {
-      includes: ["cover_art", "author"],
-      order: { followedCount: "desc" },
-      limit: 1,
-    })
+    const data = await apiRequest<any>(
+      "/manga",
+      {
+        includes: ["cover_art", "author"],
+        order: { followedCount: "desc" },
+        limit: 1,
+      },
+      "GET",
+      undefined,
+      "mangaDetails",
+    )
 
     logger.debug("Featured manga fetched successfully", { id: data.data[0]?.id })
 
@@ -141,7 +166,7 @@ export async function getFeaturedManga(): Promise<Manga> {
       if (coverRel) {
         try {
           // Fetch the cover art details separately
-          const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
+          const coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET", undefined, "coverImage")
 
           // Replace the cover_art relationship with the full data
           const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
@@ -187,11 +212,8 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
         params.order = { relevance: "desc" }
     }
 
-    // Add a small delay before making the request to avoid rate limiting
-    await new Promise((resolve) => setTimeout(resolve, 500))
-
-    // Make the request
-    const data = await apiRequest<any>("/manga", params)
+    // Make the request with caching
+    const data = await apiRequest<any>("/manga", params, "GET", undefined, "mangaDetails")
 
     // Add detailed logging
     logger.debug(`Manga list (${type}) fetched successfully`, {
@@ -215,8 +237,8 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
 
         if (coverRel) {
           try {
-            // Fetch the cover art details
-            const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
+            // Fetch the cover art details with caching
+            const coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET", undefined, "coverImage")
 
             // Add the fileName directly to the cover_art relationship attributes
             if (coverData.data && coverData.data.attributes) {
@@ -241,7 +263,7 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
   }
 }
 
-// Update the searchManga function to use axios and direct API URL format
+// Update the searchManga function to use caching
 export async function searchManga(
   query: string,
   options: {
@@ -258,6 +280,22 @@ export async function searchManga(
   const offset = options.offset || 0
 
   logger.info(`Searching manga with query: "${query}", limit: ${limit}, offset: ${offset}`)
+
+  // Generate a cache key for this search
+  const cacheKey = `search_${query}_${limit}_${offset}`
+
+  // Check cache first
+  const cachedResults = cacheManager.get<{
+    results: Manga[]
+    total: number
+    limit: number
+    offset: number
+  }>(cacheKey, "searchResults")
+
+  if (cachedResults) {
+    logger.debug(`Using cached search results for "${query}"`)
+    return cachedResults
+  }
 
   try {
     // Create a direct API request using axios
@@ -293,27 +331,41 @@ export async function searchManga(
         const coverRel = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
 
         if (coverRel) {
-          try {
-            // Fetch the cover art details
-            const coverResponse = await axios({
-              method: "GET",
-              url: `${API_BASE_URL}`,
-              params: {
-                path: `/cover/${coverRel.id}`,
-              },
-            })
+          // Generate a cache key for this cover
+          const coverCacheKey = `cover_${coverRel.id}`
 
-            const coverData = coverResponse.data
+          // Check cache first
+          const cachedCover = cacheManager.get<any>(coverCacheKey, "coverImage")
 
-            // Add the fileName directly to the cover_art relationship attributes
-            if (coverData.data && coverData.data.attributes) {
-              const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
-              if (coverIndex >= 0) {
-                manga.relationships[coverIndex].attributes = coverData.data.attributes
-              }
+          let coverData
+          if (cachedCover) {
+            coverData = cachedCover
+          } else {
+            try {
+              // Fetch the cover art details
+              const coverResponse = await axios({
+                method: "GET",
+                url: `${API_BASE_URL}`,
+                params: {
+                  path: `/cover/${coverRel.id}`,
+                },
+              })
+
+              coverData = coverResponse.data
+
+              // Cache the cover data
+              cacheManager.set(coverCacheKey, coverData, "coverImage")
+            } catch (coverError) {
+              logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
             }
-          } catch (coverError) {
-            logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
+          }
+
+          // Add the fileName directly to the cover_art relationship attributes
+          if (coverData && coverData.data && coverData.data.attributes) {
+            const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
+            if (coverIndex >= 0) {
+              manga.relationships[coverIndex].attributes = coverData.data.attributes
+            }
           }
         }
 
@@ -321,12 +373,17 @@ export async function searchManga(
       }),
     )
 
-    return {
+    const result = {
       results: mangaWithCovers,
       total: data.total || mangaWithCovers.length,
       limit: data.limit || limit,
       offset: data.offset || offset,
     }
+
+    // Cache the search results
+    cacheManager.set(cacheKey, result, "searchResults")
+
+    return result
   } catch (error) {
     logger.error(`Error in searchManga for "${query}"`, error)
     throw error
@@ -336,10 +393,25 @@ export async function searchManga(
 export async function getMangaById(id: string): Promise<Manga> {
   logger.info(`Fetching manga by ID: ${id}`)
   try {
+    // Check cache first
+    const cacheKey = `manga_${id}`
+    const cachedManga = cacheManager.get<Manga>(cacheKey, "mangaDetails")
+
+    if (cachedManga) {
+      logger.debug(`Using cached manga details for ID: ${id}`)
+      return cachedManga
+    }
+
     // Make the request
-    const data = await apiRequest<any>(`/manga/${id}`, {
-      includes: ["cover_art", "author", "artist"],
-    })
+    const data = await apiRequest<any>(
+      `/manga/${id}`,
+      {
+        includes: ["cover_art", "author", "artist"],
+      },
+      "GET",
+      undefined,
+      "mangaDetails",
+    )
 
     logger.debug(`Manga with ID ${id} fetched successfully`)
 
@@ -352,7 +424,7 @@ export async function getMangaById(id: string): Promise<Manga> {
     if (coverRel) {
       try {
         // Fetch the cover art details
-        const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
+        const coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET", undefined, "coverImage")
 
         // Add the fileName directly to the cover_art relationship attributes
         if (coverData.data && coverData.data.attributes) {
@@ -366,6 +438,9 @@ export async function getMangaById(id: string): Promise<Manga> {
       }
     }
 
+    // Cache the manga details
+    cacheManager.set(cacheKey, manga, "mangaDetails")
+
     return manga
   } catch (error) {
     logger.error(`Error in getMangaById for ID ${id}`, error)
@@ -376,8 +451,27 @@ export async function getMangaById(id: string): Promise<Manga> {
 export async function getChapterList(
   mangaId: string,
   progressCallback?: (progress: number) => void,
+  forceFresh = false,
 ): Promise<Chapter[]> {
   logger.info(`Fetching chapter list for manga ID: ${mangaId}`)
+
+  // Check cache first if not forcing fresh data
+  if (!forceFresh) {
+    const cacheKey = `chapters_${mangaId}`
+    const cachedChapters = cacheManager.get<Chapter[]>(cacheKey, "chapterList")
+
+    if (cachedChapters) {
+      logger.debug(`Using cached chapter list for manga ID: ${mangaId}`)
+
+      // Still call the progress callback with 100% if provided
+      if (progressCallback) {
+        progressCallback(100)
+      }
+
+      return cachedChapters
+    }
+  }
+
   try {
     let allChapters: Chapter[] = []
     let offset = 0
@@ -390,12 +484,19 @@ export async function getChapterList(
     while (hasMoreChapters) {
       logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
 
-      const data = await apiRequest<any>(`/manga/${mangaId}/feed`, {
-        translatedLanguage: ["en"],
-        order: { chapter: "desc" },
-        limit,
-        offset,
-      })
+      const data = await apiRequest<any>(
+        `/manga/${mangaId}/feed`,
+        {
+          translatedLanguage: ["en"],
+          order: { chapter: "desc" },
+          limit,
+          offset,
+        },
+        "GET",
+        undefined,
+        undefined, // Don't cache individual batches
+        forceFresh,
+      )
 
       const chapters = data.data
 
@@ -448,6 +549,9 @@ export async function getChapterList(
       duplicatesRemoved: allChapters.length - uniqueChapters.length,
     })
 
+    // Cache the complete chapter list
+    cacheManager.set(`chapters_${mangaId}`, uniqueChapters, "chapterList")
+
     return uniqueChapters
   } catch (error) {
     logger.error(`Error in getChapterList for manga ID ${mangaId}`, error)
@@ -455,11 +559,27 @@ export async function getChapterList(
   }
 }
 
+// Fix the error in getChapterById function
 export async function getChapterById(chapterId: string): Promise<Chapter> {
   logger.info(`Fetching chapter by ID: ${chapterId}`)
+
+  // Check cache first
+  const cacheKey = `chapter_${chapterId}`
+  const cachedChapter = cacheManager.get<Chapter>(cacheKey, "chapterList")
+
+  if (cachedChapter) {
+    logger.debug(`Using cached chapter details for ID: ${chapterId}`)
+    return cachedChapter
+  }
+
   try {
-    const data = await apiRequest<any>(`/chapter/${chapterId}`)
+    const data = await apiRequest<any>(`/chapter/${chapterId}`, {}, "GET", undefined, "chapterList")
+
     logger.debug(`Chapter with ID ${chapterId} fetched successfully`)
+
+    // Cache the chapter details
+    cacheManager.set(cacheKey, data.data, "chapterList")
+
     return data.data
   } catch (error) {
     logger.error(`Error in getChapterById for ID ${chapterId}`, error)
@@ -469,13 +589,28 @@ export async function getChapterById(chapterId: string): Promise<Chapter> {
 
 export async function getChapterPages(chapterId: string): Promise<ChapterData> {
   logger.info(`Fetching pages for chapter ID: ${chapterId}`)
+
+  // Check cache first
+  const cacheKey = `pages_${chapterId}`
+  const cachedPages = cacheManager.get<ChapterData>(cacheKey, "chapterPages")
+
+  if (cachedPages) {
+    logger.debug(`Using cached pages for chapter ID: ${chapterId}`)
+    return cachedPages
+  }
+
   try {
-    const data = await apiRequest<any>(`/at-home/server/${chapterId}`)
+    const data = await apiRequest<any>(`/at-home/server/${chapterId}`, {}, "GET", undefined, "chapterPages")
+
     logger.debug(`Pages for chapter ID ${chapterId} fetched successfully`, {
       baseUrl: data.baseUrl,
       hash: data.chapter.hash,
       pageCount: data.chapter.data.length,
     })
+
+    // Cache the chapter pages
+    cacheManager.set(cacheKey, data, "chapterPages")
+
     return data
   } catch (error) {
     logger.error(`Error in getChapterPages for chapter ID ${chapterId}`, error)

@@ -1,26 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server"
+import axios from "axios"
 import logger from "@/lib/logger"
 import authService from "@/lib/auth-service"
-import { retryWithBackoff } from "@/lib/retry-with-backoff"
+import connectionManager from "@/lib/connection-manager"
 
 // Cache for storing image responses
 const CACHE_MAX_AGE = 60 * 60 * 24 * 7 // 7 days in seconds
-
-// Retry options specifically for image fetching
-const IMAGE_RETRY_OPTIONS = {
-  maxRetries: 3,
-  initialDelay: 1000,
-  maxDelay: 10000,
-  factor: 2,
-  jitter: true,
-  retryCondition: (error: any) => {
-    // Only retry on network errors, 5xx errors, or 429 (too many requests)
-    if (error.status) {
-      return error.status === 429 || error.status >= 500
-    }
-    return true // Retry on network errors
-  },
-}
 
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url")
@@ -30,6 +15,9 @@ export async function GET(request: NextRequest) {
     return new NextResponse("Missing URL parameter", { status: 400 })
   }
 
+  // Check if we have this image in the browser cache
+  const cacheKey = `image_${url}`
+
   logger.info(`Proxying manga image: ${url}`)
 
   try {
@@ -37,7 +25,7 @@ export async function GET(request: NextRequest) {
     const sessionToken = await authService.getSessionToken()
 
     // Add headers including auth if available
-    const headers: HeadersInit = {
+    const headers: Record<string, string> = {
       "User-Agent": "MangaReader/1.0",
       Referer: "https://mangadex.org/",
       Accept: "image/webp,image/jpeg,image/png,image/*,*/*",
@@ -47,25 +35,24 @@ export async function GET(request: NextRequest) {
       headers["Authorization"] = `Bearer ${sessionToken}`
     }
 
-    // Fetch the image with retry logic
-    const response = await retryWithBackoff(async () => {
-      const res = await fetch(url, {
-        headers,
-        cache: "force-cache", // Use built-in HTTP cache when possible
-      })
+    // Check if we should use HTTP/1.1 for this host
+    const useHttp1 = connectionManager.hasHttp2Failed(url)
 
-      if (!res.ok) {
-        const error: any = new Error(`Failed to fetch image: ${res.statusText}`)
-        error.status = res.status
-        error.statusText = res.statusText
-        throw error
-      }
+    if (useHttp1) {
+      headers["Connection"] = "keep-alive"
+      headers["X-Force-HTTP1"] = "1"
+    }
 
-      return res
-    }, IMAGE_RETRY_OPTIONS)
+    // Fetch the image with axios
+    const response = await axios({
+      method: "GET",
+      url: url,
+      headers: headers,
+      responseType: "arraybuffer",
+    })
 
-    const imageBuffer = await response.arrayBuffer()
-    const contentType = response.headers.get("content-type") || "image/jpeg"
+    const imageBuffer = response.data
+    const contentType = response.headers["content-type"] || "image/jpeg"
 
     logger.debug(`Successfully proxied image: ${url}`, {
       contentType,
@@ -77,12 +64,19 @@ export async function GET(request: NextRequest) {
       headers: {
         "Content-Type": contentType,
         "Cache-Control": `public, max-age=${CACHE_MAX_AGE}, s-maxage=${CACHE_MAX_AGE}, stale-while-revalidate=86400`,
-        ETag: response.headers.get("etag") || "",
-        "Last-Modified": response.headers.get("last-modified") || new Date().toUTCString(),
+        ETag: response.headers.etag || "",
+        "Last-Modified": response.headers["last-modified"] || new Date().toUTCString(),
       },
     })
-  } catch (error) {
+  } catch (error: any) {
     logger.error(`Error proxying image: ${url}`, error)
+
+    if (error.response) {
+      return new NextResponse(`Error fetching image: ${error.response.status} ${error.response.statusText}`, {
+        status: error.response.status,
+      })
+    }
+
     return new NextResponse("Error fetching image", { status: 500 })
   }
 }
