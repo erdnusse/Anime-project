@@ -99,42 +99,19 @@ const DEFAULT_RETRY_OPTIONS = {
 
 /**
  * Helper function to build a URL with query parameters
- * This version avoids double-encoding issues
+ * This version uses a much simpler approach to avoid URL encoding issues
  */
 function buildApiUrl(path: string, params: Record<string, any> = {}): string {
   // Start with the base path
   const apiPath = path.startsWith("/") ? path : `/${path}`
 
-  // Build the query string manually to avoid encoding issues
-  const queryParts: string[] = []
-
-  // Process parameters
-  for (const [key, value] of Object.entries(params)) {
-    if (key === "includes" && Array.isArray(value)) {
-      // Handle the special 'includes' parameter
-      for (const item of value) {
-        queryParts.push(`includes[]=${encodeURIComponent(item)}`)
-      }
-    } else if (Array.isArray(value)) {
-      // Handle other array values
-      for (const item of value) {
-        queryParts.push(`${key}=${encodeURIComponent(item)}`)
-      }
-    } else if (value !== undefined && value !== null) {
-      // Handle regular values
-      queryParts.push(`${key}=${encodeURIComponent(value.toString())}`)
-    }
-  }
-
-  // Combine the path with query parameters
-  const queryString = queryParts.join("&")
-  const fullPath = apiPath + (queryString ? (apiPath.includes("?") ? "&" : "?") + queryString : "")
-
-  // Return the full URL for the proxy - encode only the path part
-  return `${API_BASE_URL}?path=${encodeURIComponent(fullPath)}`
+  // Create a direct URL to the proxy endpoint
+  return `${API_BASE_URL}?path=${apiPath}&params=${encodeURIComponent(JSON.stringify(params))}`
 }
 
-// Update the fetchWithRetry function to better handle URL validation
+/**
+ * Fetch with retry and proper error handling
+ */
 async function fetchWithRetry(
   path: string,
   params: Record<string, any> = {},
@@ -170,7 +147,7 @@ export async function getFeaturedManga(): Promise<Manga> {
   try {
     const response = await fetchWithRetry("/manga", {
       includes: ["cover_art", "author"],
-      "order[followedCount]": "desc",
+      order: { followedCount: "desc" },
       limit: 1,
     })
 
@@ -214,22 +191,22 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
     // Build params object
     const params: Record<string, any> = {
       limit,
-      includes: ["cover_art", "author"], // Use the new format with array
+      includes: ["cover_art", "author"],
     }
 
     // Add order parameter based on type
     switch (type) {
       case "popular":
-        params["order[followedCount]"] = "desc"
+        params.order = { followedCount: "desc" }
         break
       case "latest":
-        params["order[updatedAt]"] = "desc"
+        params.order = { updatedAt: "desc" }
         break
       case "new":
-        params["order[createdAt]"] = "desc"
+        params.order = { createdAt: "desc" }
         break
       default:
-        params["order[relevance]"] = "desc"
+        params.order = { relevance: "desc" }
     }
 
     // Add a small delay before making the request to avoid rate limiting
@@ -289,26 +266,40 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
   }
 }
 
-// Update the searchManga function to use the correct parameter format
-export async function searchManga(query: string): Promise<Manga[]> {
-  logger.info(`Searching manga with query: ${query}`)
+// Update the searchManga function to use the correct title search parameter
+export async function searchManga(
+  query: string,
+  options: {
+    limit?: number
+    offset?: number
+  } = {},
+): Promise<{
+  results: Manga[]
+  total: number
+  limit: number
+  offset: number
+}> {
+  const limit = options.limit || 20
+  const offset = options.offset || 0
+
+  logger.info(`Searching manga with query: "${query}", limit: ${limit}, offset: ${offset}`)
   try {
-    // According to the MangaDex API docs, we should use the title parameter
-    // with the proper locale format for searching
+    // According to the MangaDex API docs and example, we should use a simple title parameter
     const params: Record<string, any> = {
-      limit: 20,
+      limit,
+      offset,
       includes: ["cover_art", "author"],
-      // Use the proper format for title search
+      // Use the simple title parameter
       title: query,
+      // Add available translated language filter for English
+      availableTranslatedLanguage: ["en"],
+      // Add content rating filter to exclude explicit content by default
+      contentRating: ["safe", "suggestive"],
+      // Add order by relevance
+      order: { relevance: "desc" },
     }
 
-    // Add available translated language filter for English
-    // Use a string instead of an array to avoid encoding issues
-    params["availableTranslatedLanguage[]"] = "en"
-
-    // Add content rating filter to exclude explicit content by default
-    // Use separate entries for each value to avoid encoding issues
-    params["contentRating[]"] = ["safe", "suggestive"]
+    console.log("PARAMS: title:" + params.title)
 
     // Add a small delay before making the request to avoid rate limiting
     await new Promise((resolve) => setTimeout(resolve, 300))
@@ -316,7 +307,12 @@ export async function searchManga(query: string): Promise<Manga[]> {
     const response = await fetchWithRetry("/manga", params)
 
     const data = await response.json()
-    logger.debug(`Manga search for "${query}" completed successfully`, { count: data.data.length })
+    logger.debug(`Manga search for "${query}" completed successfully`, {
+      count: data.data.length,
+      total: data.total,
+      limit: data.limit,
+      offset: data.offset,
+    })
 
     // For each manga, fetch its cover art details separately
     const mangaWithCovers = await Promise.all(
@@ -345,7 +341,12 @@ export async function searchManga(query: string): Promise<Manga[]> {
       }),
     )
 
-    return mangaWithCovers
+    return {
+      results: mangaWithCovers,
+      total: data.total || mangaWithCovers.length,
+      limit: data.limit || limit,
+      offset: data.offset || offset,
+    }
   } catch (error) {
     logger.error(`Error in searchManga for "${query}"`, error)
     throw error
@@ -412,8 +413,8 @@ export async function getChapterList(
       logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
 
       const response = await fetchWithRetry(`/manga/${mangaId}/feed`, {
-        "translatedLanguage[]": "en", // Use string instead of array
-        "order[chapter]": "desc",
+        translatedLanguage: ["en"],
+        order: { chapter: "desc" },
         limit,
         offset,
       })
