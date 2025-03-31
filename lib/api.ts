@@ -1,5 +1,5 @@
+import axios from "axios"
 import logger from "./logger"
-import { retryWithBackoff } from "./retry-with-backoff"
 
 // MangaDex API types
 export interface Manga {
@@ -76,82 +76,61 @@ const API_BASE_URL = "/api/mangadex-proxy"
 // Check if we're in a browser environment
 const isBrowser = typeof window !== "undefined"
 
-// Default retry options for API requests
-const DEFAULT_RETRY_OPTIONS = {
-  maxRetries: 3,
-  initialDelay: 2000, // Increase initial delay to 2 seconds
-  maxDelay: 30000, // Increase max delay to 30 seconds
-  factor: 2, // Double the delay each time
-  jitter: true, // Add randomness to prevent thundering herd
-  retryCondition: (error: any) => {
-    // Always retry on rate limit errors
-    if (error.status === 429) {
-      return true
-    }
-
-    // Only retry on network errors or 5xx server errors
-    if (error.status && error.status >= 400 && error.status < 500) {
-      return false // Don't retry other client errors
-    }
-    return true // Retry on network errors and 5xx
-  },
-}
-
 /**
  * Helper function to build a URL with query parameters
- * This version uses a much simpler approach to avoid URL encoding issues
  */
-function buildApiUrl(path: string, params: Record<string, any> = {}): string {
+function buildApiUrl(path: string): string {
   // Start with the base path
   const apiPath = path.startsWith("/") ? path : `/${path}`
-
-  // Create a direct URL to the proxy endpoint
-  return `${API_BASE_URL}?path=${apiPath}&params=${encodeURIComponent(JSON.stringify(params))}`
+  return `${API_BASE_URL}?path=${apiPath}`
 }
 
 /**
- * Fetch with retry and proper error handling
+ * Make an API request using axios
  */
-async function fetchWithRetry(
+async function apiRequest<T>(
   path: string,
   params: Record<string, any> = {},
-  options?: RequestInit,
-): Promise<Response> {
-  const url = buildApiUrl(path, params)
+  method: "GET" | "POST" = "GET",
+  data?: any,
+): Promise<T> {
+  const url = buildApiUrl(path)
 
-  return retryWithBackoff(async () => {
-    try {
-      const response = await fetch(url, options)
+  try {
+    logger.debug(`Making ${method} request to ${url}`, { params })
 
-      // If the response is not ok, throw an error with status
-      if (!response.ok) {
-        const errorText = await response.text()
-        const error: any = new Error(`API request failed: ${response.status} ${response.statusText}`)
-        error.status = response.status
-        error.statusText = response.statusText
-        error.body = errorText
-        throw error
-      }
+    const response = await axios({
+      method,
+      url,
+      params: method === "GET" ? { params: JSON.stringify(params) } : undefined,
+      data: method === "POST" ? data : undefined,
+    })
 
-      return response
-    } catch (error: any) {
-      // Add more context to the error
-      error.message = `Error fetching ${url}: ${error.message}`
-      throw error
+    return response.data
+  } catch (error: any) {
+    // Add more context to the error
+    if (error.response) {
+      logger.error(`API error: ${error.response.status} ${error.response.statusText}`, error.response.data)
+      throw new Error(`API request failed: ${error.response.status} ${error.response.statusText}`)
+    } else if (error.request) {
+      logger.error(`No response received from API`, error)
+      throw new Error(`No response received from API: ${error.message}`)
+    } else {
+      logger.error(`Error setting up request: ${error.message}`, error)
+      throw new Error(`Error setting up request: ${error.message}`)
     }
-  }, DEFAULT_RETRY_OPTIONS)
+  }
 }
 
 export async function getFeaturedManga(): Promise<Manga> {
   logger.info("Fetching featured manga")
   try {
-    const response = await fetchWithRetry("/manga", {
+    const data = await apiRequest<any>("/manga", {
       includes: ["cover_art", "author"],
       order: { followedCount: "desc" },
       limit: 1,
     })
 
-    const data = await response.json()
     logger.debug("Featured manga fetched successfully", { id: data.data[0]?.id })
 
     // If we have a manga, fetch its cover art separately
@@ -162,8 +141,7 @@ export async function getFeaturedManga(): Promise<Manga> {
       if (coverRel) {
         try {
           // Fetch the cover art details separately
-          const coverResponse = await fetchWithRetry(`/cover/${coverRel.id}`)
-          const coverData = await coverResponse.json()
+          const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
 
           // Replace the cover_art relationship with the full data
           const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
@@ -213,9 +191,7 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
     await new Promise((resolve) => setTimeout(resolve, 500))
 
     // Make the request
-    const response = await fetchWithRetry("/manga", params)
-
-    const data = await response.json()
+    const data = await apiRequest<any>("/manga", params)
 
     // Add detailed logging
     logger.debug(`Manga list (${type}) fetched successfully`, {
@@ -240,8 +216,7 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
         if (coverRel) {
           try {
             // Fetch the cover art details
-            const coverResponse = await fetchWithRetry(`/cover/${coverRel.id}`)
-            const coverData = await coverResponse.json()
+            const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
 
             // Add the fileName directly to the cover_art relationship attributes
             if (coverData.data && coverData.data.attributes) {
@@ -266,7 +241,7 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
   }
 }
 
-// Update the searchManga function to use the correct title search parameter
+// Update the searchManga function to use axios and direct API URL format
 export async function searchManga(
   query: string,
   options: {
@@ -283,30 +258,28 @@ export async function searchManga(
   const offset = options.offset || 0
 
   logger.info(`Searching manga with query: "${query}", limit: ${limit}, offset: ${offset}`)
+
   try {
-    // According to the MangaDex API docs and example, we should use a simple title parameter
-    const params: Record<string, any> = {
-      limit,
-      offset,
-      includes: ["cover_art", "author"],
-      // Use the simple title parameter
-      title: query,
-      // Add available translated language filter for English
-      availableTranslatedLanguage: ["en"],
-      // Add content rating filter to exclude explicit content by default
-      contentRating: ["safe", "suggestive"],
-      // Add order by relevance
-      order: { relevance: "desc" },
-    }
+    // Create a direct API request using axios
+    const response = await axios({
+      method: "GET",
+      url: `${API_BASE_URL}`,
+      params: {
+        path: "/manga",
+        params: JSON.stringify({
+          title: query,
+          limit,
+          offset,
+          includes: ["cover_art", "author"],
+          availableTranslatedLanguage: ["en"],
+          contentRating: ["safe", "suggestive"],
+          order: { relevance: "desc" },
+        }),
+      },
+    })
 
-    console.log("PARAMS: title:" + params.title)
+    const data = response.data
 
-    // Add a small delay before making the request to avoid rate limiting
-    await new Promise((resolve) => setTimeout(resolve, 300))
-
-    const response = await fetchWithRetry("/manga", params)
-
-    const data = await response.json()
     logger.debug(`Manga search for "${query}" completed successfully`, {
       count: data.data.length,
       total: data.total,
@@ -322,8 +295,15 @@ export async function searchManga(
         if (coverRel) {
           try {
             // Fetch the cover art details
-            const coverResponse = await fetchWithRetry(`/cover/${coverRel.id}`)
-            const coverData = await coverResponse.json()
+            const coverResponse = await axios({
+              method: "GET",
+              url: `${API_BASE_URL}`,
+              params: {
+                path: `/cover/${coverRel.id}`,
+              },
+            })
+
+            const coverData = coverResponse.data
 
             // Add the fileName directly to the cover_art relationship attributes
             if (coverData.data && coverData.data.attributes) {
@@ -356,12 +336,11 @@ export async function searchManga(
 export async function getMangaById(id: string): Promise<Manga> {
   logger.info(`Fetching manga by ID: ${id}`)
   try {
-    // Make separate requests to avoid parameter overriding
-    const response = await fetchWithRetry(`/manga/${id}`, {
+    // Make the request
+    const data = await apiRequest<any>(`/manga/${id}`, {
       includes: ["cover_art", "author", "artist"],
     })
 
-    const data = await response.json()
     logger.debug(`Manga with ID ${id} fetched successfully`)
 
     // Get the manga
@@ -373,8 +352,7 @@ export async function getMangaById(id: string): Promise<Manga> {
     if (coverRel) {
       try {
         // Fetch the cover art details
-        const coverResponse = await fetchWithRetry(`/cover/${coverRel.id}`)
-        const coverData = await coverResponse.json()
+        const coverData = await apiRequest<any>(`/cover/${coverRel.id}`)
 
         // Add the fileName directly to the cover_art relationship attributes
         if (coverData.data && coverData.data.attributes) {
@@ -412,14 +390,13 @@ export async function getChapterList(
     while (hasMoreChapters) {
       logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
 
-      const response = await fetchWithRetry(`/manga/${mangaId}/feed`, {
+      const data = await apiRequest<any>(`/manga/${mangaId}/feed`, {
         translatedLanguage: ["en"],
         order: { chapter: "desc" },
         limit,
         offset,
       })
 
-      const data = await response.json()
       const chapters = data.data
 
       // Get the total number of chapters from the first response
@@ -481,9 +458,7 @@ export async function getChapterList(
 export async function getChapterById(chapterId: string): Promise<Chapter> {
   logger.info(`Fetching chapter by ID: ${chapterId}`)
   try {
-    const response = await fetchWithRetry(`/chapter/${chapterId}`)
-
-    const data = await response.json()
+    const data = await apiRequest<any>(`/chapter/${chapterId}`)
     logger.debug(`Chapter with ID ${chapterId} fetched successfully`)
     return data.data
   } catch (error) {
@@ -495,9 +470,7 @@ export async function getChapterById(chapterId: string): Promise<Chapter> {
 export async function getChapterPages(chapterId: string): Promise<ChapterData> {
   logger.info(`Fetching pages for chapter ID: ${chapterId}`)
   try {
-    const response = await fetchWithRetry(`/at-home/server/${chapterId}`)
-
-    const data = await response.json()
+    const data = await apiRequest<any>(`/at-home/server/${chapterId}`)
     logger.debug(`Pages for chapter ID ${chapterId} fetched successfully`, {
       baseUrl: data.baseUrl,
       hash: data.chapter.hash,
