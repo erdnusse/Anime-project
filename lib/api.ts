@@ -99,47 +99,42 @@ const DEFAULT_RETRY_OPTIONS = {
 
 /**
  * Helper function to build a URL with query parameters
- * This version uses a simpler approach to avoid encoding issues
+ * This version avoids double-encoding issues
  */
 function buildApiUrl(path: string, params: Record<string, any> = {}): string {
   // Start with the base path
-  let apiPath = path.startsWith("/") ? path : `/${path}`
+  const apiPath = path.startsWith("/") ? path : `/${path}`
 
-  // Add query parameters if any
-  if (Object.keys(params).length > 0) {
-    const queryParams: string[] = []
+  // Build the query string manually to avoid encoding issues
+  const queryParts: string[] = []
 
-    // Build query parameters manually
-    for (const [key, value] of Object.entries(params)) {
-      if (key === "includes" && Array.isArray(value)) {
-        // Handle the special 'includes' parameter
-        for (const item of value) {
-          queryParams.push(`includes[]=${item}`)
-        }
-      } else if (Array.isArray(value)) {
-        // Handle other array values
-        for (const item of value) {
-          queryParams.push(`${key}=${item}`)
-        }
-      } else {
-        // Handle regular values
-        queryParams.push(`${key}=${value}`)
+  // Process parameters
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "includes" && Array.isArray(value)) {
+      // Handle the special 'includes' parameter
+      for (const item of value) {
+        queryParts.push(`includes[]=${encodeURIComponent(item)}`)
       }
+    } else if (Array.isArray(value)) {
+      // Handle other array values
+      for (const item of value) {
+        queryParts.push(`${key}=${encodeURIComponent(item)}`)
+      }
+    } else if (value !== undefined && value !== null) {
+      // Handle regular values
+      queryParts.push(`${key}=${encodeURIComponent(value.toString())}`)
     }
-
-    // Add the query string to the path
-    apiPath += apiPath.includes("?") ? "&" : "?"
-    apiPath += queryParams.join("&")
   }
 
-  // Return the full URL without encoding the path
-  // The proxy route will handle the path as-is
-  return `${API_BASE_URL}?path=${apiPath}`
+  // Combine the path with query parameters
+  const queryString = queryParts.join("&")
+  const fullPath = apiPath + (queryString ? (apiPath.includes("?") ? "&" : "?") + queryString : "")
+
+  // Return the full URL for the proxy - encode only the path part
+  return `${API_BASE_URL}?path=${encodeURIComponent(fullPath)}`
 }
 
-/**
- * Fetch with retry and proper error handling
- */
+// Update the fetchWithRetry function to better handle URL validation
 async function fetchWithRetry(
   path: string,
   params: Record<string, any> = {},
@@ -294,14 +289,31 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
   }
 }
 
+// Update the searchManga function to use the correct parameter format
 export async function searchManga(query: string): Promise<Manga[]> {
   logger.info(`Searching manga with query: ${query}`)
   try {
-    const response = await fetchWithRetry("/manga", {
-      title: query,
-      includes: ["cover_art", "author"],
+    // According to the MangaDex API docs, we should use the title parameter
+    // with the proper locale format for searching
+    const params: Record<string, any> = {
       limit: 20,
-    })
+      includes: ["cover_art", "author"],
+      // Use the proper format for title search
+      title: query,
+    }
+
+    // Add available translated language filter for English
+    // Use a string instead of an array to avoid encoding issues
+    params["availableTranslatedLanguage[]"] = "en"
+
+    // Add content rating filter to exclude explicit content by default
+    // Use separate entries for each value to avoid encoding issues
+    params["contentRating[]"] = ["safe", "suggestive"]
+
+    // Add a small delay before making the request to avoid rate limiting
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    const response = await fetchWithRetry("/manga", params)
 
     const data = await response.json()
     logger.debug(`Manga search for "${query}" completed successfully`, { count: data.data.length })

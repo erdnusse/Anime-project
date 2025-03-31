@@ -23,6 +23,7 @@ const API_RETRY_OPTIONS = {
   },
 }
 
+// Update the GET handler in the proxy route to better handle URL validation
 export async function GET(request: NextRequest) {
   // Extract the path parameter from the request
   const { searchParams } = new URL(request.url)
@@ -34,8 +35,6 @@ export async function GET(request: NextRequest) {
   }
 
   // Construct the full URL to the MangaDex API
-  // Important: We need to use the path as-is without modifying it
-  // The path is already properly formatted by the client
   const apiUrl = `${MANGADEX_API_URL}${path}`
 
   logger.info(`Proxying MangaDex API request to: ${apiUrl}`)
