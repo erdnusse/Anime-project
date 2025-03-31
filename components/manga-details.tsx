@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import Image from "next/image"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { BookOpen, Calendar, Clock, User, RefreshCw, Download } from "lucide-react"
+import { BookOpen, Calendar, Clock, User, RefreshCw, Download, Bookmark, BookmarkCheck } from "lucide-react"
 import { getMangaById, getCoverImageUrl, getTitle, getDescription, getAuthorName, getChapterList } from "@/lib/api"
 import logger from "@/lib/logger"
 import type { Manga, Chapter } from "@/lib/api"
@@ -13,8 +13,19 @@ import DownloadProgressModal from "./download-progress-modal"
 import { downloadManga, downloadZip, type DownloadProgress } from "@/lib/download-manager"
 import LoginForm from "./login-form"
 import authService from "@/lib/auth-service"
+import { useUser } from "@clerk/nextjs"
+import {
+  addBookmark,
+  removeBookmark,
+  getBookmarks,
+  isMangaBookmarked,
+  type Bookmark as BookmarkType,
+} from "@/lib/bookmarks"
+import { getMangaReadingProgress, getLastReadChapter, type ReadingProgress } from "@/lib/reading-progress"
+import Link from "next/link"
 
 export default function MangaDetails({ id }: { id: string }) {
+  const { isSignedIn } = useUser()
   const [manga, setManga] = useState<Manga | null>(null)
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [loading, setLoading] = useState(true)
@@ -25,6 +36,10 @@ export default function MangaDetails({ id }: { id: string }) {
   const [downloadedZip, setDownloadedZip] = useState<Blob | null>(null)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [showLoginForm, setShowLoginForm] = useState(false)
+  const [bookmarks, setBookmarks] = useState<BookmarkType[]>([])
+  const [isBookmarked, setIsBookmarked] = useState(false)
+  const [readingProgress, setReadingProgress] = useState<ReadingProgress[]>([])
+  const [lastReadChapter, setLastReadChapter] = useState<ReadingProgress | null>(null)
 
   // Check authentication status on component mount
   useEffect(() => {
@@ -36,6 +51,7 @@ export default function MangaDetails({ id }: { id: string }) {
     checkAuth()
   }, [])
 
+  // Load manga details and user data
   useEffect(() => {
     async function loadMangaDetails() {
       try {
@@ -49,6 +65,25 @@ export default function MangaDetails({ id }: { id: string }) {
         setManga(mangaData)
         setChapters(chapterList)
         setLoading(false)
+
+        // If user is signed in, load bookmarks and reading progress
+        if (isSignedIn) {
+          try {
+            const [bookmarksData, readingHistoryData] = await Promise.all([getBookmarks(), getMangaReadingProgress(id)])
+
+            setBookmarks(bookmarksData)
+            setReadingProgress(readingHistoryData)
+
+            // Check if manga is bookmarked
+            setIsBookmarked(isMangaBookmarked(id, bookmarksData))
+
+            // Get last read chapter
+            const lastRead = getLastReadChapter(readingHistoryData)
+            setLastReadChapter(lastRead)
+          } catch (err) {
+            logger.error("Failed to load user data", err)
+          }
+        }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load manga details for ID: ${id}`, err)
@@ -58,7 +93,7 @@ export default function MangaDetails({ id }: { id: string }) {
     }
 
     loadMangaDetails()
-  }, [id, retryCount])
+  }, [id, retryCount, isSignedIn])
 
   const handleRetry = () => {
     logger.info(`Retrying manga details load for ID: ${id}`)
@@ -154,6 +189,30 @@ export default function MangaDetails({ id }: { id: string }) {
     }
   }
 
+  const handleToggleBookmark = async () => {
+    if (!isSignedIn || !manga) return
+
+    try {
+      if (isBookmarked) {
+        // Remove bookmark
+        const success = await removeBookmark(id)
+        if (success) {
+          setIsBookmarked(false)
+          setBookmarks((prev) => prev.filter((b) => b.mangaId !== id))
+        }
+      } else {
+        // Add bookmark
+        const result = await addBookmark(id)
+        if (result) {
+          setIsBookmarked(true)
+          setBookmarks((prev) => [...prev, result])
+        }
+      }
+    } catch (error) {
+      logger.error("Failed to toggle bookmark", error)
+    }
+  }
+
   if (showLoginForm) {
     return <LoginForm onLogin={handleLogin} />
   }
@@ -228,10 +287,40 @@ export default function MangaDetails({ id }: { id: string }) {
             <p>{description}</p>
           </div>
           <div className="flex flex-wrap gap-3 mt-2">
-            <Button>
-              <BookOpen className="mr-2 h-4 w-4" />
-              Start Reading
-            </Button>
+            {lastReadChapter ? (
+              <Button asChild>
+                <Link href={`/manga/${id}/chapter/${lastReadChapter.chapterId}`}>
+                  <BookOpen className="mr-2 h-4 w-4" />
+                  Continue Reading
+                </Link>
+              </Button>
+            ) : (
+              <Button asChild>
+                <Link href={`/manga/${id}/chapter/${chapters[0]?.id}`}>
+                  <BookOpen className="mr-2 h-4 w-4" />
+                  Start Reading
+                </Link>
+              </Button>
+            )}
+            {isSignedIn && (
+              <Button
+                variant={isBookmarked ? "default" : "outline"}
+                onClick={handleToggleBookmark}
+                className={isBookmarked ? "bg-blue-500 hover:bg-blue-600" : ""}
+              >
+                {isBookmarked ? (
+                  <>
+                    <BookmarkCheck className="mr-2 h-4 w-4" />
+                    Bookmarked
+                  </>
+                ) : (
+                  <>
+                    <Bookmark className="mr-2 h-4 w-4" />
+                    Bookmark
+                  </>
+                )}
+              </Button>
+            )}
             <Button variant="outline" onClick={handleDownload} disabled={isDownloading || chapters.length === 0}>
               <Download className="mr-2 h-4 w-4" />
               Download Manga

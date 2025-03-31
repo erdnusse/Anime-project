@@ -1,7 +1,7 @@
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft } from "lucide-react"
-import ChapterReader from "@/components/chapter-reader"
+import ChapterReaderWithProgress from "@/components/chapter-reader-with-progress"
 import ChapterNavigation from "@/components/chapter-navigation"
 
 export default async function ChapterPage({
@@ -27,7 +27,7 @@ export default async function ChapterPage({
           <ChapterNavigation mangaId={id} chapterId={chapterId} />
         </div>
 
-        <ChapterReader mangaId={id} chapterId={chapterId} />
+        <ChapterReaderWithProgress mangaId={id} chapterId={chapterId} />
 
         <div className="flex items-center justify-center gap-4 py-4">
           <ChapterNavigation mangaId={id} chapterId={chapterId} />
