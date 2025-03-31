@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { currentUser } from "@clerk/nextjs/server"
 import prisma from "@/lib/prisma"
 import logger from "@/lib/logger"
+import { ensureUserExists } from "@/lib/user-service"
 
 // Get bookmarks for a user
 export async function GET(request: NextRequest) {
@@ -38,12 +39,16 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = user.id
+    const userEmail = user.emailAddresses[0]?.emailAddress || ""
 
     const { mangaId } = await request.json()
 
     if (!mangaId) {
       return NextResponse.json({ error: "Missing mangaId field" }, { status: 400 })
     }
+
+    // Ensure the user exists in our database before creating a bookmark
+    await ensureUserExists(userId, userEmail)
 
     // Upsert bookmark (create if not exists, ignore if exists)
     const bookmark = await prisma.bookmark.upsert({

@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { UserButton, SignInButton, SignUpButton, useUser } from "@clerk/nextjs"
+import { SignInButton, SignUpButton, useUser, SignOutButton } from "@clerk/nextjs"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-import { Bookmark, History, User } from "lucide-react"
+import { LogOut, Bookmark, History, User } from "lucide-react"
 
 export default function UserNav() {
   const { isSignedIn, user } = useUser()
@@ -71,18 +71,13 @@ export default function UserNav() {
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem className="cursor-pointer">
-          <UserButton
-            afterSignOutUrl="/"
-            appearance={{
-              elements: {
-                userButtonBox: "hidden",
-                userButtonTrigger: "hidden",
-                userButtonPopoverCard: "hidden",
-              },
-            }}
-          />
-          <span>Sign out</span>
+        <DropdownMenuItem asChild>
+          <SignOutButton>
+            <button className="w-full flex items-center cursor-pointer text-left">
+              <LogOut className="mr-2 h-4 w-4" />
+              <span>Sign out</span>
+            </button>
+          </SignOutButton>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

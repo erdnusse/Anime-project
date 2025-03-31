@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server"
 import { currentUser } from "@clerk/nextjs/server"
 import prisma from "@/lib/prisma"
 import logger from "@/lib/logger"
+import { ensureUserExists } from "@/lib/user-service"
 
 // Get reading progress for a user
 export async function GET(request: NextRequest) {
@@ -55,12 +56,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
     const userId = user.id
+    const userEmail = user.emailAddresses[0]?.emailAddress || ""
 
     const { mangaId, chapterId, progress = 100 } = await request.json()
 
     if (!mangaId || !chapterId) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
     }
+
+    // Ensure the user exists in our database before creating reading history
+    await ensureUserExists(userId, userEmail)
 
     // Upsert reading progress (create or update)
     const readingProgress = await prisma.readingHistory.upsert({
