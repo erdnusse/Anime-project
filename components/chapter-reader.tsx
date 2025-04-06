@@ -35,6 +35,15 @@ export default function ChapterReader({
       try {
         setLoading(true)
         setError(null)
+
+        // Validate chapter ID
+        if (!chapterId) {
+          logger.error("Chapter ID is missing or invalid")
+          setError("Chapter ID is missing or invalid")
+          setLoading(false)
+          return
+        }
+
         logger.info(`Loading chapter: ${chapterId} for manga: ${mangaId}`)
 
         // Get chapter info and pages in parallel

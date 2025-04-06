@@ -573,8 +573,19 @@ export async function getAdjacentChapters(
   try {
     logger.info(`Finding adjacent chapters for chapter ID: ${currentChapterId}`)
 
+    if (!mangaId || !currentChapterId) {
+      logger.warn("Missing mangaId or currentChapterId in getAdjacentChapters")
+      return { prev: null, next: null }
+    }
+
     // First, get the current chapter to find its number
     const currentChapter = await getChapterById(currentChapterId)
+
+    if (!currentChapter || !currentChapter.attributes) {
+      logger.warn(`Could not find chapter with ID: ${currentChapterId}`)
+      return { prev: null, next: null }
+    }
+
     const currentChapterNumber = currentChapter.attributes.chapter
       ? Number.parseFloat(currentChapter.attributes.chapter)
       : 0
@@ -607,8 +618,8 @@ export async function getAdjacentChapters(
       "GET",
     )
 
-    const prev = prevChapterData.data.length > 0 ? prevChapterData.data[0] : null
-    const next = nextChapterData.data.length > 0 ? nextChapterData.data[0] : null
+    const prev = prevChapterData?.data?.length > 0 ? prevChapterData.data[0] : null
+    const next = nextChapterData?.data?.length > 0 ? nextChapterData.data[0] : null
 
     logger.debug(`Adjacent chapters for chapter ID ${currentChapterId}`, {
       prevId: prev?.id,
@@ -653,6 +664,12 @@ export async function getChapterById(chapterId: string): Promise<Chapter> {
 export async function getChapterPages(chapterId: string): Promise<ChapterData> {
   logger.info(`Fetching pages for chapter ID: ${chapterId}`)
 
+  // Check if chapterId is undefined or empty
+  if (!chapterId) {
+    logger.error("Chapter ID is undefined or empty")
+    throw new Error("Chapter ID is required to fetch pages")
+  }
+
   // Check cache first
   const cacheKey = `pages_${chapterId}`
   const cachedPages = cacheManager.get<ChapterData>(cacheKey, "chapterPages")
@@ -664,6 +681,12 @@ export async function getChapterPages(chapterId: string): Promise<ChapterData> {
 
   try {
     const data = await apiRequest<any>(`/at-home/server/${chapterId}`, {}, "GET", undefined, "chapterPages")
+
+    // Validate the response data
+    if (!data || !data.chapter || !data.chapter.hash) {
+      logger.error(`Invalid response data for chapter ID: ${chapterId}`, data)
+      throw new Error("Invalid response data from MangaDex API")
+    }
 
     logger.debug(`Pages for chapter ID ${chapterId} fetched successfully`, {
       baseUrl: data.baseUrl,

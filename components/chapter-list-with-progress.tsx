@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { getChapterList, getChapterNumber, getChapterTitle } from "@/lib/api"
@@ -52,6 +52,10 @@ export default function ChapterListWithProgress({
   const [totalPages, setTotalPages] = useState(1)
   const [totalChapters, setTotalChapters] = useState(0)
   const [chaptersPerPage, setChaptersPerPage] = useState(20)
+
+  // Fix the useRef declarations with proper typing
+  const pageRefs = useRef<(HTMLDivElement | null)[]>([])
+  const observerRef = useRef<IntersectionObserver | null>(null)
 
   // Fetch chapters
   useEffect(() => {

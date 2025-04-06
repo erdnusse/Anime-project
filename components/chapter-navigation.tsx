@@ -26,6 +26,15 @@ export default function ChapterNavigation({
       try {
         setLoading(true)
         setError(null)
+
+        // Validate inputs
+        if (!mangaId || !chapterId) {
+          logger.warn("Missing manga ID or chapter ID in ChapterNavigation")
+          setError("Missing manga ID or chapter ID")
+          setLoading(false)
+          return
+        }
+
         logger.info(`Loading navigation for manga ID: ${mangaId}, chapter ID: ${chapterId}`)
 
         // Use the updated getAdjacentChapters function
