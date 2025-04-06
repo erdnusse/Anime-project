@@ -448,20 +448,37 @@ export async function getMangaById(id: string): Promise<Manga> {
   }
 }
 
+// Update the getChapterList function to support pagination
 export async function getChapterList(
   mangaId: string,
-  progressCallback?: (progress: number) => void,
-  forceFresh = false,
-): Promise<Chapter[]> {
-  logger.info(`Fetching chapter list for manga ID: ${mangaId}`)
+  options: {
+    limit?: number
+    offset?: number
+    progressCallback?: (progress: number) => void
+    forceFresh?: boolean
+  } = {},
+): Promise<{
+  chapters: Chapter[]
+  total: number
+  currentPage: number
+  totalPages: number
+}> {
+  const { limit = 20, offset = 0, progressCallback, forceFresh = false } = options
+
+  logger.info(`Fetching chapter list for manga ID: ${mangaId} (limit: ${limit}, offset: ${offset})`)
 
   // Check cache first if not forcing fresh data
   if (!forceFresh) {
-    const cacheKey = `chapters_${mangaId}`
-    const cachedChapters = cacheManager.get<Chapter[]>(cacheKey, "chapterList")
+    const cacheKey = `chapters_${mangaId}_${limit}_${offset}`
+    const cachedChapters = cacheManager.get<{
+      chapters: Chapter[]
+      total: number
+      currentPage: number
+      totalPages: number
+    }>(cacheKey, "chapterList")
 
     if (cachedChapters) {
-      logger.debug(`Using cached chapter list for manga ID: ${mangaId}`)
+      logger.debug(`Using cached chapter list for manga ID: ${mangaId} (page: ${offset / limit + 1})`)
 
       // Still call the progress callback with 100% if provided
       if (progressCallback) {
@@ -473,65 +490,52 @@ export async function getChapterList(
   }
 
   try {
-    let allChapters: Chapter[] = []
-    let offset = 0
-    let hasMoreChapters = true
-    let totalChapters = 0
-    let totalFetched = 0
-    const limit = 100 // Number of chapters per request
+    // First, get the total count with a minimal request
+    const countData = await apiRequest<any>(
+      `/manga/${mangaId}/feed`,
+      {
+        translatedLanguage: ["en"],
+        limit: 1,
+        offset: 0,
+      },
+      "GET",
+      undefined,
+      undefined,
+      forceFresh,
+    )
 
-    // Loop until we've fetched all chapters
-    while (hasMoreChapters) {
-      logger.info(`Fetching chapters batch: offset=${offset}, limit=${limit}`)
+    const totalChapters = countData.total || 0
+    const totalPages = Math.ceil(totalChapters / limit)
+    const currentPage = Math.floor(offset / limit) + 1
 
-      const data = await apiRequest<any>(
-        `/manga/${mangaId}/feed`,
-        {
-          translatedLanguage: ["en"],
-          order: { chapter: "desc" },
-          limit,
-          offset,
-        },
-        "GET",
-        undefined,
-        undefined, // Don't cache individual batches
-        forceFresh,
-      )
+    logger.info(`Total chapters available: ${totalChapters}, pages: ${totalPages}, current: ${currentPage}`)
 
-      const chapters = data.data
+    // Now fetch the requested page
+    const data = await apiRequest<any>(
+      `/manga/${mangaId}/feed`,
+      {
+        translatedLanguage: ["en"],
+        order: { chapter: "desc" },
+        limit,
+        offset,
+      },
+      "GET",
+      undefined,
+      undefined,
+      forceFresh,
+    )
 
-      // Get the total number of chapters from the first response
-      if (offset === 0) {
-        totalChapters = data.total || 0
-        logger.info(`Total chapters available: ${totalChapters}`)
-      }
+    const chapters = data.data
 
-      // Add this batch to our collection
-      allChapters = [...allChapters, ...chapters]
-      totalFetched += chapters.length
-
-      // Report progress if callback is provided
-      if (progressCallback && totalChapters > 0) {
-        const progress = Math.min(Math.round((totalFetched / totalChapters) * 100), 100)
-        progressCallback(progress)
-      }
-
-      logger.debug(`Fetched ${chapters.length} chapters, total so far: ${totalFetched}/${totalChapters}`)
-
-      // Check if we need to fetch more chapters
-      if (chapters.length < limit || totalFetched >= totalChapters) {
-        hasMoreChapters = false
-      } else {
-        // Prepare for next batch
-        offset += limit
-
-        // Add a small delay to avoid rate limiting
-        await new Promise((resolve) => setTimeout(resolve, 300))
-      }
+    // Report progress if callback is provided
+    if (progressCallback) {
+      progressCallback(100)
     }
 
+    logger.debug(`Fetched ${chapters.length} chapters for page ${currentPage}/${totalPages}`)
+
     // Sort chapters by chapter number in descending order
-    allChapters.sort((a, b) => {
+    chapters.sort((a: Chapter, b: Chapter) => {
       // Convert chapter numbers to numeric values for proper sorting
       const aNum = a.attributes.chapter ? Number.parseFloat(a.attributes.chapter) : 0
       const bNum = b.attributes.chapter ? Number.parseFloat(b.attributes.chapter) : 0
@@ -540,22 +544,81 @@ export async function getChapterList(
       return bNum - aNum
     })
 
-    // Remove duplicate chapters by ID
-    const uniqueChapters = Array.from(new Map(allChapters.map((chapter) => [chapter.id, chapter])).values())
+    const result = {
+      chapters,
+      total: totalChapters,
+      currentPage,
+      totalPages,
+    }
 
-    logger.debug(`Chapter list for manga ID ${mangaId} fetched successfully`, {
-      count: uniqueChapters.length,
-      originalCount: allChapters.length,
-      duplicatesRemoved: allChapters.length - uniqueChapters.length,
-    })
+    // Cache the paginated chapter list
+    const cacheKey = `chapters_${mangaId}_${limit}_${offset}`
+    cacheManager.set(cacheKey, result, "chapterList")
 
-    // Cache the complete chapter list
-    cacheManager.set(`chapters_${mangaId}`, uniqueChapters, "chapterList")
-
-    return uniqueChapters
+    return result
   } catch (error) {
     logger.error(`Error in getChapterList for manga ID ${mangaId}`, error)
     throw error
+  }
+}
+
+// Update the getAdjacentChapters function to work with the new pagination
+export async function getAdjacentChapters(
+  mangaId: string,
+  currentChapterId: string,
+): Promise<{
+  prev: Chapter | null
+  next: Chapter | null
+}> {
+  try {
+    logger.info(`Finding adjacent chapters for chapter ID: ${currentChapterId}`)
+
+    // First, get the current chapter to find its number
+    const currentChapter = await getChapterById(currentChapterId)
+    const currentChapterNumber = currentChapter.attributes.chapter
+      ? Number.parseFloat(currentChapter.attributes.chapter)
+      : 0
+
+    // Find the previous chapter (higher number)
+    const prevChapterData = await apiRequest<any>(
+      `/manga/${mangaId}/feed`,
+      {
+        translatedLanguage: ["en"],
+        order: { chapter: "asc" },
+        limit: 1,
+        offset: 0,
+        // Find chapters with higher number
+        chapter: [currentChapterNumber.toString(), "gt"],
+      },
+      "GET",
+    )
+
+    // Find the next chapter (lower number)
+    const nextChapterData = await apiRequest<any>(
+      `/manga/${mangaId}/feed`,
+      {
+        translatedLanguage: ["en"],
+        order: { chapter: "desc" },
+        limit: 1,
+        offset: 0,
+        // Find chapters with lower number
+        chapter: [currentChapterNumber.toString(), "lt"],
+      },
+      "GET",
+    )
+
+    const prev = prevChapterData.data.length > 0 ? prevChapterData.data[0] : null
+    const next = nextChapterData.data.length > 0 ? nextChapterData.data[0] : null
+
+    logger.debug(`Adjacent chapters for chapter ID ${currentChapterId}`, {
+      prevId: prev?.id,
+      nextId: next?.id,
+    })
+
+    return { prev, next }
+  } catch (error) {
+    logger.error(`Error in getAdjacentChapters for chapter ID ${currentChapterId}`, error)
+    return { prev: null, next: null }
   }
 }
 
@@ -703,36 +766,6 @@ export function getChapterTitle(chapter: Chapter): string {
   } catch (error) {
     logger.error(`Error in getChapterTitle for chapter ID ${chapter.id}`, error)
     return "Unknown Chapter"
-  }
-}
-
-export function getAdjacentChapters(
-  chapters: Chapter[],
-  currentChapterId: string,
-): {
-  prev: Chapter | null
-  next: Chapter | null
-} {
-  try {
-    const currentIndex = chapters.findIndex((ch) => ch.id === currentChapterId)
-
-    if (currentIndex === -1) {
-      logger.warn(`Chapter ID ${currentChapterId} not found in chapter list`)
-      return { prev: null, next: null }
-    }
-
-    const prev = currentIndex < chapters.length - 1 ? chapters[currentIndex + 1] : null
-    const next = currentIndex > 0 ? chapters[currentIndex - 1] : null
-
-    logger.debug(`Adjacent chapters for chapter ID ${currentChapterId}`, {
-      prevId: prev?.id,
-      nextId: next?.id,
-    })
-
-    return { prev, next }
-  } catch (error) {
-    logger.error(`Error in getAdjacentChapters for chapter ID ${currentChapterId}`, error)
-    return { prev: null, next: null }
   }
 }
 

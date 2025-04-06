@@ -4,11 +4,19 @@ import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { getChapterList, getChapterNumber, getChapterTitle } from "@/lib/api"
-import { Calendar, RefreshCw } from "lucide-react"
+import {
+  Calendar,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+  ChevronLeftIcon as ChevronDoubleLeft,
+  ChevronRightIcon as ChevronDoubleRight,
+} from "lucide-react"
 import logger from "@/lib/logger"
 import type { Chapter } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Progress } from "@/components/ui/progress"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 export default function ChapterList({ mangaId }: { mangaId: string }) {
   const [chapters, setChapters] = useState<Chapter[]>([])
@@ -19,27 +27,38 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [isForcingRefresh, setIsForcingRefresh] = useState(false)
 
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [totalChapters, setTotalChapters] = useState(0)
+  const [chaptersPerPage, setChaptersPerPage] = useState(20)
+
   useEffect(() => {
     async function loadChapters() {
       try {
         setLoading(true)
         setError(null)
         setLoadingProgress(0)
-        logger.info(`Loading chapters for manga ID: ${mangaId}`)
+        logger.info(`Loading chapters for manga ID: ${mangaId}, page: ${currentPage}, limit: ${chaptersPerPage}`)
 
-        const chapterList = await getChapterList(
-          mangaId,
-          (progress) => {
+        const offset = (currentPage - 1) * chaptersPerPage
+
+        const chapterData = await getChapterList(mangaId, {
+          limit: chaptersPerPage,
+          offset: offset,
+          progressCallback: (progress) => {
             setLoadingProgress(progress)
-            // If we're past the first batch, show the "loading more" indicator
+            // If we're loading, show the loading indicator
             if (progress > 0 && progress < 100) {
               setIsLoadingMore(true)
             }
           },
-          isForcingRefresh, // Pass the force refresh flag
-        )
+          forceFresh: isForcingRefresh,
+        })
 
-        setChapters(chapterList)
+        setChapters(chapterData.chapters)
+        setTotalChapters(chapterData.total)
+        setTotalPages(chapterData.totalPages)
         setLoading(false)
         setIsLoadingMore(false)
         setIsForcingRefresh(false) // Reset the force refresh flag
@@ -54,7 +73,7 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
     }
 
     loadChapters()
-  }, [mangaId, retryCount, isForcingRefresh])
+  }, [mangaId, retryCount, isForcingRefresh, currentPage, chaptersPerPage])
 
   const handleRetry = () => {
     logger.info(`Retrying chapter load for manga ID: ${mangaId}`)
@@ -64,6 +83,39 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
   const handleForceRefresh = () => {
     logger.info(`Force refreshing chapter list for manga ID: ${mangaId}`)
     setIsForcingRefresh(true)
+  }
+
+  const handlePageChange = (page: number) => {
+    if (page < 1 || page > totalPages) return
+    setCurrentPage(page)
+    // Scroll to top of chapter list
+    window.scrollTo({ top: 0, behavior: "smooth" })
+  }
+
+  const handleChaptersPerPageChange = (value: string) => {
+    const newChaptersPerPage = Number.parseInt(value)
+    setChaptersPerPage(newChaptersPerPage)
+    setCurrentPage(1) // Reset to first page when changing items per page
+  }
+
+  // Generate page numbers to display
+  const getPageNumbers = () => {
+    const pageNumbers = []
+    const maxPagesToShow = 5 // Show at most 5 page numbers
+
+    let startPage = Math.max(1, currentPage - Math.floor(maxPagesToShow / 2))
+    const endPage = Math.min(totalPages, startPage + maxPagesToShow - 1)
+
+    // Adjust if we're near the end
+    if (endPage - startPage + 1 < maxPagesToShow) {
+      startPage = Math.max(1, endPage - maxPagesToShow + 1)
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+      pageNumbers.push(i)
+    }
+
+    return pageNumbers
   }
 
   if (loading && !isLoadingMore) {
@@ -93,7 +145,7 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
   return (
     <div className="space-y-2">
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-semibold">Chapters ({chapters.length})</h2>
+        <h2 className="text-xl font-semibold">Chapters ({totalChapters})</h2>
         <Button
           variant="outline"
           size="sm"
@@ -109,12 +161,35 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
       {isLoadingMore && (
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-muted-foreground">Loading more chapters...</span>
+            <span className="text-sm text-muted-foreground">Loading chapters...</span>
             <span className="text-sm text-muted-foreground">{loadingProgress}%</span>
           </div>
           <Progress value={loadingProgress} className="h-2" />
         </div>
       )}
+
+      {/* Pagination controls - top */}
+      <div className="flex flex-col sm:flex-row justify-between items-center gap-2 mb-4">
+        <div className="text-sm text-muted-foreground">
+          Showing {(currentPage - 1) * chaptersPerPage + 1}-{Math.min(currentPage * chaptersPerPage, totalChapters)} of{" "}
+          {totalChapters} chapters
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-muted-foreground hidden sm:inline">Chapters per page:</span>
+          <Select value={chaptersPerPage.toString()} onValueChange={handleChaptersPerPageChange}>
+            <SelectTrigger className="w-[70px]">
+              <SelectValue placeholder="20" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="10">10</SelectItem>
+              <SelectItem value="20">20</SelectItem>
+              <SelectItem value="50">50</SelectItem>
+              <SelectItem value="100">100</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
       {chapters.map((chapter, index) => {
         const chapterNumber = getChapterNumber(chapter)
@@ -142,6 +217,69 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
           </div>
         )
       })}
+
+      {/* Pagination controls - bottom */}
+      {totalPages > 1 && (
+        <div className="flex justify-center mt-6">
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => handlePageChange(1)}
+              disabled={currentPage === 1}
+              className="h-8 w-8"
+            >
+              <ChevronDoubleLeft className="h-4 w-4" />
+              <span className="sr-only">First page</span>
+            </Button>
+
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => handlePageChange(currentPage - 1)}
+              disabled={currentPage === 1}
+              className="h-8 w-8"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              <span className="sr-only">Previous page</span>
+            </Button>
+
+            {getPageNumbers().map((pageNum) => (
+              <Button
+                key={pageNum}
+                variant={currentPage === pageNum ? "default" : "outline"}
+                size="sm"
+                onClick={() => handlePageChange(pageNum)}
+                className="h-8 w-8"
+              >
+                {pageNum}
+              </Button>
+            ))}
+
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => handlePageChange(currentPage + 1)}
+              disabled={currentPage === totalPages}
+              className="h-8 w-8"
+            >
+              <ChevronRight className="h-4 w-4" />
+              <span className="sr-only">Next page</span>
+            </Button>
+
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => handlePageChange(totalPages)}
+              disabled={currentPage === totalPages}
+              className="h-8 w-8"
+            >
+              <ChevronDoubleRight className="h-4 w-4" />
+              <span className="sr-only">Last page</span>
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -149,7 +287,14 @@ export default function ChapterList({ mangaId }: { mangaId: string }) {
 function ChapterListSkeleton() {
   return (
     <div className="space-y-2">
-      {Array(10)
+      <div className="flex justify-between items-center mb-4">
+        <Skeleton className="h-7 w-40" />
+        <Skeleton className="h-9 w-24" />
+      </div>
+
+      <Skeleton className="h-10 w-full mb-4" />
+
+      {Array(5)
         .fill(0)
         .map((_, i) => (
           <Skeleton key={i} className="h-12 w-full" />

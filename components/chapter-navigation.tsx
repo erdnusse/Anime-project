@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { ChevronLeft, ChevronRight, List } from "lucide-react"
 import Link from "next/link"
-import { getChapterList, getAdjacentChapters } from "@/lib/api"
+import { getAdjacentChapters } from "@/lib/api"
 import logger from "@/lib/logger"
 import type { Chapter } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -28,8 +28,8 @@ export default function ChapterNavigation({
         setError(null)
         logger.info(`Loading navigation for manga ID: ${mangaId}, chapter ID: ${chapterId}`)
 
-        const chapters = await getChapterList(mangaId)
-        const { prev, next } = getAdjacentChapters(chapters, chapterId)
+        // Use the updated getAdjacentChapters function
+        const { prev, next } = await getAdjacentChapters(mangaId, chapterId)
 
         setPrevChapter(prev)
         setNextChapter(next)
