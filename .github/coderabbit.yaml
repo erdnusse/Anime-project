@@ -1,0 +1,17 @@
+# .github/coderabbit.yaml
+reviews:
+  request_changes_threshold: major
+  auto_review:
+    enabled: true
+    ignore:
+      - "*.md"
+      - "LICENSE"
+  drafts: false
+  path_filters:
+    - "!images/**"
+    - "!assets/**"
+  path_instructions:
+    - path: "./**"
+      instructions: "This is the main source code."
+    - path: "tests/**"
+      instructions: "This contains test files."
