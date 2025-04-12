@@ -4,7 +4,6 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import Image from "next/image"
 import { Skeleton } from "@/components/ui/skeleton"
 import { getChapterPages, getChapterById, getChapterTitle, getAdjacentChapters } from "@/lib/api"
-import logger from "@/lib/logger"
 import { Button } from "@/components/ui/button"
 import {
   RefreshCw,
@@ -26,6 +25,10 @@ import { cn } from "@/lib/utils"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { useLogger } from "@/hooks/use-logger"
+import { useFullscreen } from "@/hooks/use-fullscreen"
+import { ErrorDisplay } from "@/components/error-display"
+import { RateLimitError } from "@/lib/api-error"
 
 interface SinglePageReaderProps {
   mangaId: string
@@ -40,12 +43,13 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
   const [baseUrl, setBaseUrl] = useState<string>("")
   const [hash, setHash] = useState<string>("")
   const [loading, setLoading] = useState<boolean>(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [retryCount, setRetryCount] = useState<number>(0)
+  const [retryDisabled, setRetryDisabled] = useState<boolean>(false)
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null)
 
   // Page navigation state
   const [currentPageIndex, setCurrentPageIndex] = useState<number>(0)
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false)
   const [showControls, setShowControls] = useState<boolean>(true)
   const [showSidebar, setShowSidebar] = useState<boolean>(false)
   const [hasMarkedAsRead, setHasMarkedAsRead] = useState<boolean>(false)
@@ -62,11 +66,37 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
   const readerContainerRef = useRef<HTMLDivElement>(null)
   const currentImageRef = useRef<HTMLImageElement>(null)
   const mouseIdleTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const isMountedRef = useRef<boolean>(true)
+  const pagesRef = useRef<string[]>([])
+  const preloadedImagesRef = useRef<Record<number, boolean>>({})
+  const currentPageIndexRef = useRef<number>(0)
+  const dataLoadedRef = useRef<boolean>(false)
+  const initialPreloadQueueSetRef = useRef<boolean>(false)
 
   // Reader settings
   const [readerMode, setReaderMode] = useState<"fit-width" | "fit-height" | "original">("fit-width")
 
-  // Function to get proxied image URL
+  // Hooks
+  const logger = useLogger("reader")
+  const { isFullscreen, toggleFullscreen } = useFullscreen(readerContainerRef)
+
+  // Update refs when state changes
+  useEffect(() => {
+    pagesRef.current = pages
+    currentPageIndexRef.current = currentPageIndex
+    preloadedImagesRef.current = preloadedImages
+  }, [pages, currentPageIndex, preloadedImages])
+
+  // Set mounted flag on component mount
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
+
+  // Function to get proxied image URL - memoized to avoid recreating on every render
   const getProxiedImageUrl = useCallback(
     (page: string) => {
       try {
@@ -78,25 +108,70 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
         return "/placeholder.svg"
       }
     },
-    [baseUrl, hash],
+    [baseUrl, hash, logger],
   )
 
-  // Fetch chapter data
+  // Handle retry countdown for rate limiting
   useEffect(() => {
+    if (retryCountdown === null || retryCountdown <= 0) {
+      if (retryTimeoutRef.current) {
+        clearInterval(retryTimeoutRef.current)
+        retryTimeoutRef.current = null
+      }
+      return
+    }
+
+    // Clear any existing interval first
+    if (retryTimeoutRef.current) {
+      clearInterval(retryTimeoutRef.current)
+    }
+
+    retryTimeoutRef.current = setInterval(() => {
+      setRetryCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          setRetryDisabled(false)
+          return null
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => {
+      if (retryTimeoutRef.current) {
+        clearInterval(retryTimeoutRef.current)
+        retryTimeoutRef.current = null
+      }
+    }
+  }, [retryCountdown])
+
+  // Fetch chapter data - this is the main effect causing the loop
+  useEffect(() => {
+    // Skip if retry is disabled (rate limited)
+    if (retryDisabled) return
+
+    // Skip if we've already loaded data for this chapter
+    if (dataLoadedRef.current && chapterId === chapterId) return
+
     async function loadChapter() {
       try {
         setLoading(true)
         setError(null)
-        setCurrentPageIndex(0)
-        setPreloadedImages({})
-        setPreloadQueue([])
-        setHasMarkedAsRead(false)
+
+        // Only reset these states on initial load or explicit retry, not on dependency changes
+        if (retryCount > 0 || (!pagesRef.current.length && !baseUrl && !hash)) {
+          setCurrentPageIndex(0)
+          setPreloadedImages({})
+          setPreloadQueue([])
+          setHasMarkedAsRead(false)
+        }
 
         // Validate chapter ID
         if (!chapterId) {
           logger.error("Chapter ID is missing or invalid")
-          setError("Chapter ID is missing or invalid")
-          setLoading(false)
+          if (isMountedRef.current) {
+            setError(new Error("Chapter ID is missing or invalid"))
+            setLoading(false)
+          }
           return
         }
 
@@ -109,6 +184,9 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
           getAdjacentChapters(mangaId, chapterId),
         ])
 
+        // Check if component is still mounted before updating state
+        if (!isMountedRef.current) return
+
         setTitle(getChapterTitle(chapter))
         setBaseUrl(chapterData.baseUrl)
         setHash(chapterData.chapter.hash)
@@ -118,7 +196,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
 
         if (chapterData.chapter.data.length === 0) {
           logger.error("No pages found in chapter data")
-          setError("No pages found for this chapter")
+          setError(new Error("No pages found for this chapter"))
           setLoading(false)
           return
         }
@@ -133,84 +211,138 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
           `Adjacent chapters: prev=${adjacentChapters.prev?.id || "none"}, next=${adjacentChapters.next?.id || "none"}`,
         )
 
+        // Mark that we've loaded data for this chapter
+        dataLoadedRef.current = true
         setLoading(false)
 
-        // Initialize preload queue with first few pages
-        const initialPreloadQueue = Array.from({ length: Math.min(5, chapterData.chapter.data.length) }, (_, i) => i)
-        setPreloadQueue(initialPreloadQueue)
+        // Initialize preload queue with first few pages - only if we have pages and haven't done it yet
+        if (chapterData.chapter.data.length > 0 && !initialPreloadQueueSetRef.current) {
+          const initialPreloadQueue = Array.from({ length: Math.min(5, chapterData.chapter.data.length) }, (_, i) => i)
+          setPreloadQueue(initialPreloadQueue)
+          initialPreloadQueueSetRef.current = true
+        }
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : "Unknown error"
+        if (!isMountedRef.current) return
+
         logger.error(`Failed to load chapter: ${chapterId}`, err)
-        setError(`Failed to load chapter. ${errorMessage}`)
+
+        // Handle rate limiting specifically
+        if (err instanceof RateLimitError && err.retryAfter) {
+          setRetryDisabled(true)
+          setRetryCountdown(err.retryAfter)
+        }
+
+        setError(err instanceof Error ? err : new Error("Unknown error occurred"))
         setLoading(false)
       }
     }
 
     loadChapter()
-  }, [chapterId, retryCount, mangaId])
+  }, [chapterId, mangaId, retryCount, logger, retryDisabled, baseUrl, hash])
 
-  // Preload images in queue
+  // Reset data loaded flag when chapter ID changes
   useEffect(() => {
-    if (loading || pages.length === 0 || !baseUrl || !hash || preloadQueue.length === 0) return
+    dataLoadedRef.current = false
+    initialPreloadQueueSetRef.current = false
+  }, [chapterId])
 
-    const preloadNextImage = () => {
+  // Preload images in queue - using a stable reference to avoid dependency issues
+  const preloadNextImageRef = useRef<() => void>(() => {})
+
+  // Define the preload function separately from its execution
+  useEffect(() => {
+    // Define the preload function
+    preloadNextImageRef.current = () => {
+      // Use refs to avoid dependency issues
+      const currentPages = pagesRef.current
+      const currentPreloadedImages = preloadedImagesRef.current
+
+      if (loading || currentPages.length === 0 || !baseUrl || !hash || preloadQueue.length === 0) return
+
       const nextPageIndex = preloadQueue[0]
 
       // Skip if already preloaded or out of bounds
-      if (preloadedImages[nextPageIndex] || nextPageIndex >= pages.length || nextPageIndex < 0) {
+      if (currentPreloadedImages[nextPageIndex] || nextPageIndex >= currentPages.length || nextPageIndex < 0) {
         setPreloadQueue((prev) => prev.slice(1))
         return
       }
 
-      const page = pages[nextPageIndex]
+      const page = currentPages[nextPageIndex]
       const imageUrl = getProxiedImageUrl(page)
 
-      logger.debug(`Preloading image ${nextPageIndex + 1}/${pages.length}`)
+      logger.debug(`Preloading image ${nextPageIndex + 1}/${currentPages.length}`)
 
       // Use window.Image to avoid conflict with next/image
       const img = new window.Image()
       img.src = imageUrl
       img.onload = () => {
-        setPreloadedImages((prev) => ({ ...prev, [nextPageIndex]: true }))
-        setPreloadQueue((prev) => prev.slice(1))
+        if (isMountedRef.current) {
+          setPreloadedImages((prev) => ({ ...prev, [nextPageIndex]: true }))
+          setPreloadQueue((prev) => prev.slice(1))
+        }
       }
       img.onerror = () => {
-        logger.error(`Failed to preload image ${nextPageIndex + 1}/${pages.length}`)
-        setPreloadQueue((prev) => prev.slice(1))
+        if (isMountedRef.current) {
+          logger.error(`Failed to preload image ${nextPageIndex + 1}/${currentPages.length}`)
+          setPreloadQueue((prev) => prev.slice(1))
+        }
       }
     }
+  }, [baseUrl, hash, loading, getProxiedImageUrl, logger, preloadQueue])
 
-    preloadNextImage()
-  }, [preloadQueue, preloadedImages, pages, baseUrl, hash, loading, getProxiedImageUrl])
+  // Execute preload using the stable reference - separate effect to avoid dependency issues
+  useEffect(() => {
+    if (preloadQueue.length > 0 && preloadNextImageRef.current) {
+      preloadNextImageRef.current()
+    }
+  }, [preloadQueue])
 
-  // Update preload queue when current page changes
+  // Update preload queue when current page changes - with stable dependencies
   useEffect(() => {
     if (loading || pages.length === 0) return
+
+    // Create a local copy of the current state to avoid closure issues
+    const currentPageIdx = currentPageIndex
+    const currentPages = [...pages]
+    const currentPreloadedImgs = { ...preloadedImages }
 
     // Preload next 3 pages after current page
     const newPagesToPreload: number[] = []
     for (let i = 1; i <= 3; i++) {
-      const pageIndex = currentPageIndex + i
-      if (pageIndex < pages.length && !preloadedImages[pageIndex]) {
+      const pageIndex = currentPageIdx + i
+      if (pageIndex < currentPages.length && !currentPreloadedImgs[pageIndex]) {
         newPagesToPreload.push(pageIndex)
       }
     }
 
     if (newPagesToPreload.length > 0) {
-      setPreloadQueue((prev) => [...new Set([...prev, ...newPagesToPreload])])
+      setPreloadQueue((prev) => {
+        // Create a Set to remove duplicates, then convert back to array
+        const combinedQueue = [...prev, ...newPagesToPreload]
+        return [...new Set(combinedQueue)]
+      })
     }
 
     // Check if we're at the end of the chapter
-    if (currentPageIndex === pages.length - 1 && !hasMarkedAsRead && isSignedIn) {
-      markChapterAsRead(mangaId, chapterId).then(() => {
-        setHasMarkedAsRead(true)
-        logger.info(`Marked chapter ${chapterId} as read automatically`)
-      })
+    if (currentPageIdx === currentPages.length - 1 && !hasMarkedAsRead && isSignedIn) {
+      markChapterAsRead(mangaId, chapterId)
+        .then(() => {
+          if (isMountedRef.current) {
+            setHasMarkedAsRead(true)
+            logger.info(`Marked chapter ${chapterId} as read automatically`)
+          }
+        })
+        .catch((err) => {
+          logger.error(`Failed to mark chapter as read: ${chapterId}`, err)
+          // Don't set error state here as it's not critical to the reading experience
+        })
     }
-  }, [currentPageIndex, pages.length, preloadedImages, loading, mangaId, chapterId, hasMarkedAsRead, isSignedIn])
+  }, [currentPageIndex, pages, preloadedImages, loading, mangaId, chapterId, hasMarkedAsRead, isSignedIn, logger])
 
   // Handle mouse movement to show/hide controls
   useEffect(() => {
+    const showSidebarValue = showSidebar // Capture current value to avoid closure issues
+
     const handleMouseMove = () => {
       setShowControls(true)
 
@@ -219,7 +351,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       }
 
       mouseIdleTimerRef.current = setTimeout(() => {
-        if (!showSidebar) {
+        if (!showSidebarValue && isMountedRef.current) {
           setShowControls(false)
         }
       }, 3000)
@@ -231,23 +363,23 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       window.removeEventListener("mousemove", handleMouseMove)
       if (mouseIdleTimerRef.current) {
         clearTimeout(mouseIdleTimerRef.current)
+        mouseIdleTimerRef.current = null
       }
     }
   }, [showSidebar])
 
-  // Keyboard navigation
-  useHotkeys("left", () => navigatePage(-1), [currentPageIndex])
-  useHotkeys("right", () => navigatePage(1), [currentPageIndex, pages.length])
-  useHotkeys("f", toggleFullscreen, [isFullscreen])
-
-  // Navigation functions
+  // Navigation functions - defined before they're used in hotkeys
   const navigatePage = useCallback(
     (direction: number) => {
+      // Use refs to get the latest values
+      const currentIdx = currentPageIndexRef.current
+      const currentPages = pagesRef.current
+
       logger.info(
-        `Navigating page: direction=${direction}, currentIndex=${currentPageIndex}, totalPages=${pages.length}`,
+        `Navigating page: direction=${direction}, currentIndex=${currentIdx}, totalPages=${currentPages.length}`,
       )
 
-      if (direction < 0 && currentPageIndex === 0) {
+      if (direction < 0 && currentIdx === 0) {
         // If at first page and trying to go back, go to previous chapter if available
         if (prevChapter) {
           logger.info(`Navigating to previous chapter: ${prevChapter}`)
@@ -256,7 +388,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
         return
       }
 
-      if (direction > 0 && currentPageIndex >= pages.length - 1) {
+      if (direction > 0 && currentIdx >= currentPages.length - 1) {
         // If at last page and trying to go forward, go to next chapter if available
         if (nextChapter) {
           logger.info(`Navigating to next chapter: ${nextChapter}`)
@@ -266,85 +398,58 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       }
 
       // Otherwise, just update the current page index
-      const newIndex = currentPageIndex + direction
-      logger.info(`Setting new page index: ${newIndex}`)
-      setCurrentPageIndex(newIndex)
+      const newIndex = currentIdx + direction
+      if (newIndex >= 0 && newIndex < currentPages.length) {
+        logger.info(`Setting new page index: ${newIndex}`)
+        setCurrentPageIndex(newIndex)
+      }
     },
-    [currentPageIndex, pages.length, prevChapter, nextChapter, mangaId, router],
+    [prevChapter, nextChapter, mangaId, router, logger],
   )
 
-  // Toggle fullscreen
-  function toggleFullscreen() {
-    if (!document.fullscreenElement) {
-      readerContainerRef.current?.requestFullscreen().catch((err) => {
-        logger.error("Error attempting to enable fullscreen", err)
-      })
-      setIsFullscreen(true)
-    } else {
-      document.exitFullscreen()
-      setIsFullscreen(false)
-    }
-  }
+  // Keyboard navigation - memoized to avoid recreating on every render
+  const handleLeftKey = useCallback(() => navigatePage(-1), [navigatePage])
+  const handleRightKey = useCallback(() => navigatePage(1), [navigatePage])
+  const handleFKey = useCallback(() => toggleFullscreen(), [toggleFullscreen])
 
-  // Handle fullscreen change event
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
+  // Set up hotkeys with stable references
+  useHotkeys("left", handleLeftKey)
+  useHotkeys("right", handleRightKey)
+  useHotkeys("f", handleFKey)
 
-    document.addEventListener("fullscreenchange", handleFullscreenChange)
-
-    return () => {
-      document.removeEventListener("fullscreenchange", handleFullscreenChange)
-    }
-  }, [])
-
-  const handleRetry = () => {
+  const handleRetry = useCallback(() => {
     logger.info(`Retrying chapter load: ${chapterId}`)
+    dataLoadedRef.current = false // Reset the data loaded flag
+    initialPreloadQueueSetRef.current = false // Reset the initial preload queue flag
     setRetryCount((prev) => prev + 1)
-  }
+  }, [chapterId, logger])
 
-  const handleMarkAsRead = async () => {
+  const handleMarkAsRead = useCallback(async () => {
     if (!isSignedIn) return
 
     try {
       await markChapterAsRead(mangaId, chapterId)
-      setHasMarkedAsRead(true)
-      logger.info(`Manually marked chapter ${chapterId} as read`)
+      if (isMountedRef.current) {
+        setHasMarkedAsRead(true)
+        logger.info(`Manually marked chapter ${chapterId} as read`)
+      }
     } catch (error) {
       logger.error(`Failed to mark chapter as read: ${chapterId}`, error)
     }
-  }
-
-  const preloadImage = useCallback(
-    (page: string, index: number) => {
-      const imageUrl = getProxiedImageUrl(page)
-
-      // Skip if already preloaded
-      if (preloadedImages[index]) return
-
-      // Use window.Image to avoid conflict with next/image
-      const img = new window.Image()
-      img.src = imageUrl
-      img.onload = () => {
-        setPreloadedImages((prev) => ({ ...prev, [index]: true }))
-        logger.debug(`Preloaded image ${index + 1}/${pages.length}`)
-      }
-      img.onerror = () => {
-        logger.error(`Failed to preload image ${index + 1}/${pages.length}`)
-      }
-    },
-    [getProxiedImageUrl, preloadedImages, pages.length],
-  )
+  }, [isSignedIn, mangaId, chapterId, logger])
 
   if (error) {
     return (
-      <div className="text-center py-12">
-        <p className="text-red-500 mb-4">{error}</p>
-        <Button onClick={handleRetry} className="flex items-center gap-2">
-          <RefreshCw className="h-4 w-4" />
-          Retry
-        </Button>
+      <div className="container mx-auto py-8 px-4">
+        <ErrorDisplay error={error} onRetry={handleRetry} className="max-w-2xl mx-auto" />
+        <div className="mt-4 text-center">
+          <Button variant="outline" asChild className="mx-auto">
+            <Link href={`/manga/${mangaId}`}>
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Manga
+            </Link>
+          </Button>
+        </div>
       </div>
     )
   }
@@ -362,7 +467,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
     <div
       ref={readerContainerRef}
       className={cn(
-        "relative flex flex-col items-center justify-center w-full h-[calc(100vh-64px)] bg-black",
+        "relative flex flex-col items-center justify-center w-full h-[calc(100vh-64px)] bg-black overflow-hidden",
         isFullscreen && "h-screen",
       )}
       onMouseMove={() => setShowControls(true)}
@@ -506,7 +611,11 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       </div>
 
       {/* Left navigation area */}
-      <div className="absolute left-0 top-0 w-1/3 h-full z-5 cursor-w-resize" onClick={() => navigatePage(-1)}>
+      <div
+        className="absolute left-0 top-0 w-1/2 h-full z-5 cursor-w-resize"
+        onClick={() => navigatePage(-1)}
+        aria-label="Previous page"
+      >
         <div
           className={cn(
             "absolute left-4 top-1/2 transform -translate-y-1/2 bg-black/50 rounded-full p-3 transition-opacity duration-300",
@@ -518,7 +627,11 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       </div>
 
       {/* Right navigation area */}
-      <div className="absolute right-0 top-0 w-1/3 h-full z-5 cursor-e-resize" onClick={() => navigatePage(1)}>
+      <div
+        className="absolute right-0 top-0 w-1/2 h-full z-5 cursor-e-resize"
+        onClick={() => navigatePage(1)}
+        aria-label="Next page"
+      >
         <div
           className={cn(
             "absolute right-4 top-1/2 transform -translate-y-1/2 bg-black/50 rounded-full p-3 transition-opacity duration-300",
@@ -530,11 +643,11 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
       </div>
 
       {/* Current page display */}
-      <div className="relative flex items-center justify-center w-full h-full">
+      <div className="relative flex items-center justify-center w-full h-full overflow-hidden">
         {pages.length > 0 && currentPageIndex < pages.length ? (
           <div
             className={cn(
-              "relative max-w-full max-h-full transition-transform duration-200",
+              "relative max-w-full max-h-full transition-transform duration-200 px-2",
               readerMode === "fit-width" && "w-full h-auto",
               readerMode === "fit-height" && "h-full w-auto",
               readerMode === "original" && "w-auto h-auto",
@@ -552,10 +665,16 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
                   width={800}
                   height={1200}
                   className={cn(
-                    "object-contain",
+                    "object-contain max-w-full max-h-full",
                     readerMode === "fit-width" && "w-full h-auto",
                     readerMode === "fit-height" && "h-full w-auto",
+                    readerMode === "original" && "max-h-[95vh] max-w-[95vw]",
                   )}
+                  style={{
+                    objectFit: "contain",
+                    maxWidth: "100%",
+                    maxHeight: isFullscreen ? "100vh" : "calc(100vh - 64px)",
+                  }}
                   priority={true}
                   unoptimized={true}
                   onError={(e) => {
@@ -583,4 +702,3 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
     </div>
   )
 }
-

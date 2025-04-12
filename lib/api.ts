@@ -1,6 +1,11 @@
-import axios from "axios"
+import { NetworkError, ApiError, RateLimitError, NotFoundError } from "./api-error"
+import { useLogger } from "@/hooks/use-logger"
+import axios, { type AxiosError } from "axios"
 import logger from "./logger"
 import cacheManager from "./cache-manager"
+
+// Initialize logger outside the function to avoid conditional hook call
+const loggerInstance = useLogger("api")
 
 // MangaDex API types
 export interface Manga {
@@ -87,7 +92,7 @@ function buildApiUrl(path: string): string {
 }
 
 /**
- * Make an API request using axios with caching
+ * Make an API request using axios with caching and improved error handling
  */
 async function apiRequest<T>(
   path: string,
@@ -127,19 +132,58 @@ async function apiRequest<T>(
 
     return response.data
   } catch (error: any) {
-    // Add more context to the error
-    if (error.response) {
-      logger.error(`API error: ${error.response.status} ${error.response.statusText}`, error.response.data)
-      throw new Error(`API request failed: ${error.response.status} ${error.response.statusText}`)
-    } else if (error.request) {
-      logger.error(`No response received from API`, error)
-      throw new Error(`No response received from API: ${error.message}`)
-    } else {
-      logger.error(`Error setting up request: ${error.message}`, error)
-      throw new Error(`Error setting up request: ${error.message}`)
+    // Enhanced error handling with specific error types
+    if (axios.isAxiosError(error)) {
+      const axiosError = error as AxiosError
+
+      // Handle rate limiting (429 Too Many Requests)
+      if (axiosError.response?.status === 429) {
+        const retryAfter = Number.parseInt(
+          axiosError.response.headers["retry-after"] || axiosError.response.headers["Retry-After"] || "60",
+          10,
+        )
+        logger.warn(`Rate limit exceeded. Retry after ${retryAfter} seconds.`, {
+          path,
+          retryAfter,
+        })
+        throw new RateLimitError(
+          `API rate limit exceeded. Please wait ${retryAfter} seconds before trying again.`,
+          retryAfter,
+        )
+      }
+
+      // Handle not found errors (404)
+      if (axiosError.response?.status === 404) {
+        logger.error(`Resource not found: ${path}`, axiosError.response.data)
+        throw new NotFoundError(`The requested resource was not found: ${path}`)
+      }
+
+      // Handle other API errors with status codes
+      if (axiosError.response) {
+        logger.error(
+          `API error: ${axiosError.response.status} ${axiosError.response.statusText}`,
+          axiosError.response.data,
+        )
+        throw new ApiError(
+          `API request failed: ${axiosError.response.status} ${axiosError.response.statusText}`,
+          axiosError.response.status,
+        )
+      }
+
+      // Handle network errors (no response)
+      if (axiosError.request) {
+        logger.error(`Network error: No response received from API`, axiosError)
+        throw new NetworkError("No response received from API. Please check your internet connection.")
+      }
     }
+
+    // Handle other unexpected errors
+    logger.error(`Unexpected error in API request: ${error.message}`, error)
+    throw new Error(`Error in API request: ${error.message}`)
   }
 }
+
+// Wrap API functions with better error handling and prevent infinite loops
 
 export async function getFeaturedManga(): Promise<Manga> {
   logger.info("Fetching featured manga")
@@ -175,6 +219,7 @@ export async function getFeaturedManga(): Promise<Manga> {
           }
         } catch (coverError) {
           logger.error(`Error fetching cover details for featured manga`, coverError)
+          // Continue without cover art rather than failing the whole request
         }
       }
 
@@ -184,7 +229,7 @@ export async function getFeaturedManga(): Promise<Manga> {
     return data.data[0]
   } catch (error) {
     logger.error("Error in getFeaturedManga", error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
@@ -230,40 +275,60 @@ export async function getMangaList(type: string, limit = 20): Promise<Manga[]> {
       logger.debug("First manga cover art relationship:", coverArtRel)
     }
 
+    // Create a stable reference to the manga array to avoid dependency issues
+    const mangaList = [...data.data]
+
     // For each manga, fetch its cover art details separately
-    const mangaWithCovers = await Promise.all(
-      data.data.map(async (manga: Manga) => {
-        const coverRel = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
+    // Use Promise.allSettled to prevent one failure from affecting others
+    const coverPromises = mangaList.map(async (manga: Manga, index: number) => {
+      const coverRel = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
 
-        if (coverRel) {
-          try {
-            // Fetch the cover art details with caching
-            const coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET", undefined, "coverImage")
+      if (coverRel) {
+        try {
+          // Fetch the cover art details with caching
+          const coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET", undefined, "coverImage")
 
-            // Add the fileName directly to the cover_art relationship attributes
-            if (coverData.data && coverData.data.attributes) {
-              const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
-              if (coverIndex >= 0) {
-                manga.relationships[coverIndex].attributes = coverData.data.attributes
+          // Return the updated manga with cover art
+          if (coverData.data && coverData.data.attributes) {
+            const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
+            if (coverIndex >= 0) {
+              // Create a new relationships array to avoid mutating the original
+              const updatedRelationships = [...manga.relationships]
+              updatedRelationships[coverIndex] = {
+                ...updatedRelationships[coverIndex],
+                attributes: coverData.data.attributes,
+              }
+
+              // Return a new manga object with updated relationships
+              return {
+                ...manga,
+                relationships: updatedRelationships,
               }
             }
-          } catch (coverError) {
-            logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
           }
+        } catch (coverError) {
+          logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
+          // Continue without cover art
         }
+      }
 
-        return manga
-      }),
+      // Return the original manga if no updates were made
+      return manga
+    })
+
+    const results = await Promise.allSettled(coverPromises)
+    const mangaWithCovers = results.map((result, index) =>
+      result.status === "fulfilled" ? result.value : mangaList[index],
     )
 
     return mangaWithCovers
   } catch (error) {
     logger.error(`Error in getMangaList (${type})`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
-// Update the searchManga function to use caching
+// Update the searchManga function with improved error handling
 export async function searchManga(
   query: string,
   options: {
@@ -298,25 +363,20 @@ export async function searchManga(
   }
 
   try {
-    // Create a direct API request using axios
-    const response = await axios({
-      method: "GET",
-      url: `${API_BASE_URL}`,
-      params: {
-        path: "/manga",
-        params: JSON.stringify({
-          title: query,
-          limit,
-          offset,
-          includes: ["cover_art", "author"],
-          availableTranslatedLanguage: ["en"],
-          contentRating: ["safe", "suggestive"],
-          order: { relevance: "desc" },
-        }),
+    // Use our enhanced apiRequest function instead of direct axios call
+    const data = await apiRequest<any>(
+      "/manga",
+      {
+        title: query,
+        limit,
+        offset,
+        includes: ["cover_art", "author"],
+        availableTranslatedLanguage: ["en"],
+        contentRating: ["safe", "suggestive"],
+        order: { relevance: "desc" },
       },
-    })
-
-    const data = response.data
+      "GET",
+    )
 
     logger.debug(`Manga search for "${query}" completed successfully`, {
       count: data.data.length,
@@ -325,52 +385,64 @@ export async function searchManga(
       offset: data.offset,
     })
 
-    // For each manga, fetch its cover art details separately
-    const mangaWithCovers = await Promise.all(
-      data.data.map(async (manga: Manga) => {
-        const coverRel = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
+    // Create a stable reference to the manga array
+    const mangaList = [...data.data]
 
-        if (coverRel) {
-          // Generate a cache key for this cover
-          const coverCacheKey = `cover_${coverRel.id}`
+    // For each manga, fetch its cover art details separately using Promise.allSettled
+    const coverPromises = mangaList.map(async (manga: Manga) => {
+      const coverRel = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
 
-          // Check cache first
-          const cachedCover = cacheManager.get<any>(coverCacheKey, "coverImage")
+      if (coverRel) {
+        // Generate a cache key for this cover
+        const coverCacheKey = `cover_${coverRel.id}`
 
-          let coverData
-          if (cachedCover) {
-            coverData = cachedCover
-          } else {
-            try {
-              // Fetch the cover art details
-              const coverResponse = await axios({
-                method: "GET",
-                url: `${API_BASE_URL}`,
-                params: {
-                  path: `/cover/${coverRel.id}`,
-                },
-              })
+        // Check cache first
+        const cachedCover = cacheManager.get<any>(coverCacheKey, "coverImage")
 
-              coverData = coverResponse.data
+        let coverData
+        if (cachedCover) {
+          coverData = cachedCover
+        } else {
+          try {
+            // Fetch the cover art details using our enhanced apiRequest
+            coverData = await apiRequest<any>(`/cover/${coverRel.id}`, {}, "GET")
 
-              // Cache the cover data
-              cacheManager.set(coverCacheKey, coverData, "coverImage")
-            } catch (coverError) {
-              logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
-            }
-          }
-
-          // Add the fileName directly to the cover_art relationship attributes
-          if (coverData && coverData.data && coverData.data.attributes) {
-            const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
-            if (coverIndex >= 0) {
-              manga.relationships[coverIndex].attributes = coverData.data.attributes
-            }
+            // Cache the cover data
+            cacheManager.set(coverCacheKey, coverData, "coverImage")
+          } catch (coverError) {
+            logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
+            // Continue without cover art
+            return manga
           }
         }
 
-        return manga
-      }),
+        // Add the fileName directly to the cover_art relationship attributes
+        if (coverData && coverData.data && coverData.data.attributes) {
+          const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
+          if (coverIndex >= 0) {
+            // Create a new relationships array to avoid mutating the original
+            const updatedRelationships = [...manga.relationships]
+            updatedRelationships[coverIndex] = {
+              ...updatedRelationships[coverIndex],
+              attributes: coverData.data.attributes,
+            }
+
+            // Return a new manga object with updated relationships
+            return {
+              ...manga,
+              relationships: updatedRelationships,
+            }
+          }
+        }
+      }
+
+      // Return the original manga if no updates were made
+      return manga
+    })
+
+    const results = await Promise.allSettled(coverPromises)
+    const mangaWithCovers = results.map((result, index) =>
+      result.status === "fulfilled" ? result.value : mangaList[index],
     )
 
     const result = {
@@ -386,7 +458,7 @@ export async function searchManga(
     return result
   } catch (error) {
     logger.error(`Error in searchManga for "${query}"`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
@@ -428,13 +500,21 @@ export async function getMangaById(id: string): Promise<Manga> {
 
         // Add the fileName directly to the cover_art relationship attributes
         if (coverData.data && coverData.data.attributes) {
+          // Create a new manga object with updated relationships to avoid mutation
           const coverIndex = manga.relationships.findIndex((rel: Relationship) => rel.type === "cover_art")
           if (coverIndex >= 0) {
-            manga.relationships[coverIndex].attributes = coverData.data.attributes
+            const updatedRelationships = [...manga.relationships]
+            updatedRelationships[coverIndex] = {
+              ...updatedRelationships[coverIndex],
+              attributes: coverData.data.attributes,
+            }
+
+            manga.relationships = updatedRelationships
           }
         }
       } catch (coverError) {
         logger.error(`Error fetching cover details for manga ${manga.id}`, coverError)
+        // Continue without cover art
       }
     }
 
@@ -444,11 +524,11 @@ export async function getMangaById(id: string): Promise<Manga> {
     return manga
   } catch (error) {
     logger.error(`Error in getMangaById for ID ${id}`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
-// Update the getChapterList function to support pagination
+// Update the getChapterList function with improved error handling
 export async function getChapterList(
   mangaId: string,
   options: {
@@ -558,11 +638,11 @@ export async function getChapterList(
     return result
   } catch (error) {
     logger.error(`Error in getChapterList for manga ID ${mangaId}`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
-// Update the getAdjacentChapters function to work with the new pagination
+// Update the getAdjacentChapters function with improved error handling
 export async function getAdjacentChapters(
   mangaId: string,
   currentChapterId: string,
@@ -629,13 +709,19 @@ export async function getAdjacentChapters(
     return { prev, next }
   } catch (error) {
     logger.error(`Error in getAdjacentChapters for chapter ID ${currentChapterId}`, error)
+    // Return empty result instead of throwing to prevent cascading failures
     return { prev: null, next: null }
   }
 }
 
-// Fix the error in getChapterById function
+// Update getChapterById function with improved error handling
 export async function getChapterById(chapterId: string): Promise<Chapter> {
   logger.info(`Fetching chapter by ID: ${chapterId}`)
+
+  if (!chapterId) {
+    logger.error("Chapter ID is undefined or empty")
+    throw new Error("Chapter ID is required to fetch chapter details")
+  }
 
   // Check cache first
   const cacheKey = `chapter_${chapterId}`
@@ -657,7 +743,7 @@ export async function getChapterById(chapterId: string): Promise<Chapter> {
     return data.data
   } catch (error) {
     logger.error(`Error in getChapterById for ID ${chapterId}`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
@@ -700,16 +786,21 @@ export async function getChapterPages(chapterId: string): Promise<ChapterData> {
     return data
   } catch (error) {
     logger.error(`Error in getChapterPages for chapter ID ${chapterId}`, error)
-    throw error
+    throw error // Re-throw to be handled by the component
   }
 }
 
-// Update the getCoverImageUrl function to use our proxy
+// Update the getCoverImageUrl function with better error handling
 export function getCoverImageUrl(manga: Manga): string {
   try {
     logger.debug(`Getting cover image for manga ID ${manga.id}`, {
       relationshipsCount: manga.relationships?.length || 0,
     })
+
+    if (!manga || !manga.relationships) {
+      logger.warn(`Invalid manga object or missing relationships`)
+      return "/placeholder.svg?height=320&width=240"
+    }
 
     const coverRelationship = manga.relationships.find((rel: Relationship) => rel.type === "cover_art")
 
@@ -733,13 +824,19 @@ export function getCoverImageUrl(manga: Manga): string {
     logger.debug(`Cover image URL for manga ID ${manga.id}`, { url: originalUrl })
     return `/api/manga-image?url=${encodeURIComponent(originalUrl)}`
   } catch (error) {
-    logger.error(`Error in getCoverImageUrl for manga ID ${manga.id}`, error)
+    logger.error(`Error in getCoverImageUrl for manga ID ${manga?.id || "unknown"}`, error)
     return "/placeholder.svg?height=320&width=240"
   }
 }
 
+// The remaining utility functions with defensive programming to prevent errors
+
 export function getAuthorName(manga: Manga): string {
   try {
+    if (!manga || !manga.relationships) {
+      return "Unknown Author"
+    }
+
     const authorRelationship = manga.relationships.find((rel: Relationship) => rel.type === "author")
 
     if (!authorRelationship || !authorRelationship.attributes) {
@@ -749,46 +846,61 @@ export function getAuthorName(manga: Manga): string {
 
     return authorRelationship.attributes.name
   } catch (error) {
-    logger.error(`Error in getAuthorName for manga ID ${manga.id}`, error)
+    logger.error(`Error in getAuthorName for manga ID ${manga?.id || "unknown"}`, error)
     return "Unknown Author"
   }
 }
 
 export function getTitle(manga: Manga): string {
   try {
+    if (!manga || !manga.attributes || !manga.attributes.title) {
+      return "Unknown Title"
+    }
+
     const titles = manga.attributes.title
     return titles.en || titles[Object.keys(titles)[0]] || "Unknown Title"
   } catch (error) {
-    logger.error(`Error in getTitle for manga ID ${manga.id}`, error)
+    logger.error(`Error in getTitle for manga ID ${manga?.id || "unknown"}`, error)
     return "Unknown Title"
   }
 }
 
 export function getDescription(manga: Manga): string {
   try {
+    if (!manga || !manga.attributes || !manga.attributes.description) {
+      return "No description available."
+    }
+
     const descriptions = manga.attributes.description
     return descriptions.en || descriptions[Object.keys(descriptions)[0]] || "No description available."
   } catch (error) {
-    logger.error(`Error in getDescription for manga ID ${manga.id}`, error)
+    logger.error(`Error in getDescription for manga ID ${manga?.id || "unknown"}`, error)
     return "No description available."
   }
 }
 
 export function getChapterNumber(chapter: Chapter): string {
   try {
+    if (!chapter || !chapter.attributes) {
+      return "N/A"
+    }
+
     return chapter.attributes.chapter || "N/A"
   } catch (error) {
-    logger.error(`Error in getChapterNumber for chapter ID ${chapter.id}`, error)
+    logger.error(`Error in getChapterNumber for chapter ID ${chapter?.id || "unknown"}`, error)
     return "N/A"
   }
 }
 
 export function getChapterTitle(chapter: Chapter): string {
   try {
+    if (!chapter || !chapter.attributes) {
+      return "Unknown Chapter"
+    }
+
     return chapter.attributes.title || `Chapter ${getChapterNumber(chapter)}`
   } catch (error) {
-    logger.error(`Error in getChapterTitle for chapter ID ${chapter.id}`, error)
+    logger.error(`Error in getChapterTitle for chapter ID ${chapter?.id || "unknown"}`, error)
     return "Unknown Chapter"
   }
 }
-
