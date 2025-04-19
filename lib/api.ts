@@ -1,8 +1,17 @@
-import { NetworkError, ApiError, RateLimitError, NotFoundError } from "./api-error"
+import {
+  NetworkError,
+  RateLimitError,
+  NotFoundError,
+  ClientError,
+  TimeoutError,
+  ServerError,
+  createApiError,
+} from "./api-error"
 import { useLogger } from "@/hooks/use-logger"
 import axios, { type AxiosError } from "axios"
 import logger from "./logger"
 import cacheManager from "./cache-manager"
+import { retryWithBackoff } from "./retry-with-backoff"
 
 // Initialize logger outside the function to avoid conditional hook call
 const loggerInstance = useLogger("api")
@@ -91,15 +100,15 @@ function buildApiUrl(path: string): string {
   return `${API_BASE_URL}?path=${apiPath}`
 }
 
-/**
- * Make an API request using axios with caching and improved error handling
- */
+// Update the apiRequest function to use our enhanced retry mechanism
+
+// Modify the apiRequest function to use our enhanced retry mechanism
 async function apiRequest<T>(
   path: string,
   params: Record<string, any> = {},
   method: "GET" | "POST" = "GET",
   data?: any,
-  cacheType?: string, // Simplified type to fix the TypeScript error
+  cacheType?: string,
   forceFresh = false,
 ): Promise<T> {
   // Generate a cache key based on the request
@@ -115,72 +124,123 @@ async function apiRequest<T>(
 
   const url = buildApiUrl(path)
 
-  try {
-    logger.debug(`Making ${method} request to ${url}`, { params })
+  // Define the request function to be retried
+  const makeRequest = async (): Promise<T> => {
+    try {
+      logger.debug(`Making ${method} request to ${url}`, { params })
 
-    const response = await axios({
-      method,
-      url,
-      params: method === "GET" ? { params: JSON.stringify(params) } : undefined,
-      data: method === "POST" ? data : undefined,
-    })
+      const response = await axios({
+        method,
+        url,
+        params: method === "GET" ? { params: JSON.stringify(params) } : undefined,
+        data: method === "POST" ? data : undefined,
+        timeout: 30000, // 30 second timeout
+      })
 
-    // Cache the response if it's a GET request
-    if (method === "GET" && cacheType) {
-      cacheManager.set(cacheKey, response.data, cacheType as any)
+      // Cache the response if it's a GET request
+      if (method === "GET" && cacheType) {
+        cacheManager.set(cacheKey, response.data, cacheType as any)
+      }
+
+      return response.data
+    } catch (error: any) {
+      // Enhanced error handling with specific error types
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError
+
+        // Handle rate limiting (429 Too Many Requests)
+        if (axiosError.response?.status === 429) {
+          const retryAfter = Number.parseInt(
+            axiosError.response.headers["retry-after"] || axiosError.response.headers["Retry-After"] || "60",
+            10,
+          )
+          logger.warn(`Rate limit exceeded. Retry after ${retryAfter} seconds.`, {
+            path,
+            retryAfter,
+          })
+          throw new RateLimitError(
+            `API rate limit exceeded. Please wait ${retryAfter} seconds before trying again.`,
+            retryAfter,
+          )
+        }
+
+        // Handle not found errors (404)
+        if (axiosError.response?.status === 404) {
+          logger.error(`Resource not found: ${path}`, axiosError.response.data)
+          throw new NotFoundError(`The requested resource was not found: ${path}`)
+        }
+
+        // Handle server errors (5xx)
+        if (axiosError.response?.status && axiosError.response.status >= 500) {
+          logger.error(
+            `Server error: ${axiosError.response.status} ${axiosError.response.statusText}`,
+            axiosError.response.data,
+          )
+          throw new ServerError(
+            `Server error: ${axiosError.response.status} ${axiosError.response.statusText}`,
+            axiosError.response.status,
+          )
+        }
+
+        // Handle other API errors with status codes
+        if (axiosError.response) {
+          logger.error(
+            `API error: ${axiosError.response.status} ${axiosError.response.statusText}`,
+            axiosError.response.data,
+          )
+          throw createApiError(
+            `API request failed: ${axiosError.response.status} ${axiosError.response.statusText}`,
+            axiosError.response.status,
+          )
+        }
+
+        // Handle timeout errors
+        if (axiosError.code === "ECONNABORTED") {
+          logger.error(`Request timeout for ${path}`, axiosError)
+          throw new TimeoutError(`Request to ${path} timed out. Please try again.`)
+        }
+
+        // Handle network errors (no response)
+        if (axiosError.request) {
+          logger.error(`Network error: No response received from API`, axiosError)
+          throw new NetworkError("No response received from API. Please check your internet connection.")
+        }
+      }
+
+      // Handle other unexpected errors
+      logger.error(`Unexpected error in API request: ${error.message}`, error)
+      throw new Error(`Error in API request: ${error.message}`)
     }
-
-    return response.data
-  } catch (error: any) {
-    // Enhanced error handling with specific error types
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError
-
-      // Handle rate limiting (429 Too Many Requests)
-      if (axiosError.response?.status === 429) {
-        const retryAfter = Number.parseInt(
-          axiosError.response.headers["retry-after"] || axiosError.response.headers["Retry-After"] || "60",
-          10,
-        )
-        logger.warn(`Rate limit exceeded. Retry after ${retryAfter} seconds.`, {
-          path,
-          retryAfter,
-        })
-        throw new RateLimitError(
-          `API rate limit exceeded. Please wait ${retryAfter} seconds before trying again.`,
-          retryAfter,
-        )
-      }
-
-      // Handle not found errors (404)
-      if (axiosError.response?.status === 404) {
-        logger.error(`Resource not found: ${path}`, axiosError.response.data)
-        throw new NotFoundError(`The requested resource was not found: ${path}`)
-      }
-
-      // Handle other API errors with status codes
-      if (axiosError.response) {
-        logger.error(
-          `API error: ${axiosError.response.status} ${axiosError.response.statusText}`,
-          axiosError.response.data,
-        )
-        throw new ApiError(
-          `API request failed: ${axiosError.response.status} ${axiosError.response.statusText}`,
-          axiosError.response.status,
-        )
-      }
-
-      // Handle network errors (no response)
-      if (axiosError.request) {
-        logger.error(`Network error: No response received from API`, axiosError)
-        throw new NetworkError("No response received from API. Please check your internet connection.")
-      }
-    }
-
-    // Handle other unexpected errors
-    logger.error(`Unexpected error in API request: ${error.message}`, error)
-    throw new Error(`Error in API request: ${error.message}`)
   }
+
+  // Use our enhanced retry mechanism
+  return retryWithBackoff(
+    makeRequest,
+    {
+      maxRetries: 3,
+      initialDelay: 1000,
+      maxDelay: 10000,
+      factor: 2,
+      jitter: true,
+      onRetry: (attempt, error) => {
+        logger.warn(`Retry attempt ${attempt} for ${path}: ${error.message}`)
+      },
+      retryCondition: (error) => {
+        // Retry on network errors, timeouts, and server errors
+        if (error instanceof NetworkError) return true
+        if (error instanceof TimeoutError) return true
+        if (error instanceof ServerError) return true
+        if (error instanceof RateLimitError) return true
+
+        // Don't retry on client errors (except rate limiting which is handled above)
+        if (error instanceof ClientError) return false
+
+        // For other errors, retry if they don't have a retryable property or if it's true
+        return error.retryable !== false
+      },
+    },
+    url,
+  )
 }
 
 // Wrap API functions with better error handling and prevent infinite loops

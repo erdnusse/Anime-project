@@ -1,8 +1,16 @@
 "use client"
-import { AlertCircle, Clock, RefreshCw, WifiOff } from "lucide-react"
+import { AlertCircle, Clock, RefreshCw, WifiOff, Server, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { RateLimitError, NetworkError, NotFoundError, ApiError } from "@/lib/api-error"
+import {
+  RateLimitError,
+  NetworkError,
+  NotFoundError,
+  ApiError,
+  TimeoutError,
+  ServerError,
+  ClientError,
+} from "@/lib/api-error"
 
 interface ErrorDisplayProps {
   error: Error
@@ -52,6 +60,34 @@ export function ErrorDisplay({ error, onRetry, className }: ErrorDisplayProps) {
     )
   }
 
+  if (error instanceof TimeoutError) {
+    return (
+      <Card className={className}>
+        <CardHeader className="bg-amber-50 dark:bg-amber-950/30">
+          <CardTitle className="flex items-center text-amber-700 dark:text-amber-400">
+            <Clock className="mr-2 h-5 w-5" />
+            Request Timeout
+          </CardTitle>
+          <CardDescription>The request took too long to complete.</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <p>
+            The server took too long to respond. This could be due to network congestion or server load. Please try
+            again in a moment.
+          </p>
+        </CardContent>
+        <CardFooter>
+          {onRetry && (
+            <Button variant="outline" onClick={onRetry} className="ml-auto">
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          )}
+        </CardFooter>
+      </Card>
+    )
+  }
+
   if (error instanceof NetworkError) {
     return (
       <Card className={className}>
@@ -77,6 +113,35 @@ export function ErrorDisplay({ error, onRetry, className }: ErrorDisplayProps) {
     )
   }
 
+  if (error instanceof ServerError) {
+    return (
+      <Card className={className}>
+        <CardHeader className="bg-red-50 dark:bg-red-950/30">
+          <CardTitle className="flex items-center text-red-700 dark:text-red-400">
+            <Server className="mr-2 h-5 w-5" />
+            Server Error
+          </CardTitle>
+          <CardDescription>The server encountered an error processing your request.</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <p>
+            There was a problem on the server side. This is not your fault. Please try again later or contact support if
+            the problem persists.
+          </p>
+          <p className="text-sm text-muted-foreground mt-2">Error details: {error.message}</p>
+        </CardContent>
+        <CardFooter>
+          {onRetry && (
+            <Button variant="outline" onClick={onRetry} className="ml-auto">
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          )}
+        </CardFooter>
+      </Card>
+    )
+  }
+
   if (error instanceof NotFoundError) {
     return (
       <Card className={className}>
@@ -89,6 +154,35 @@ export function ErrorDisplay({ error, onRetry, className }: ErrorDisplayProps) {
         </CardHeader>
         <CardContent className="pt-6">
           <p>The chapter or manga you're looking for might have been removed or is unavailable.</p>
+        </CardContent>
+        <CardFooter>
+          {onRetry && (
+            <Button variant="outline" onClick={onRetry} className="ml-auto">
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          )}
+        </CardFooter>
+      </Card>
+    )
+  }
+
+  if (error instanceof ClientError) {
+    return (
+      <Card className={className}>
+        <CardHeader className="bg-amber-50 dark:bg-amber-950/30">
+          <CardTitle className="flex items-center text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="mr-2 h-5 w-5" />
+            Request Error
+          </CardTitle>
+          <CardDescription>There was a problem with the request.</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <p>
+            The request could not be completed due to an error in the request parameters. This might be a temporary
+            issue.
+          </p>
+          <p className="text-sm text-muted-foreground mt-2">Error details: {error.message}</p>
         </CardContent>
         <CardFooter>
           {onRetry && (

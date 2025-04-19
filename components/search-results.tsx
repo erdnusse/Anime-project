@@ -6,8 +6,9 @@ import Image from "next/image"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { BookOpen, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react"
+import { BookOpen, ChevronLeft, ChevronRight } from "lucide-react"
 import { searchManga, getCoverImageUrl, getTitle, getDescription, type Manga } from "@/lib/api"
+import { ApiError, NetworkError, RateLimitError, TimeoutError, ServerError } from "@/lib/api-error"
 import logger from "@/lib/logger"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -18,6 +19,7 @@ import {
   PaginationLink,
 } from "@/components/ui/pagination"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ErrorDisplay } from "@/components/error-display"
 
 export default function SearchResults({ query }: { query: string }) {
   const [results, setResults] = useState<Manga[]>([])
@@ -40,6 +42,7 @@ export default function SearchResults({ query }: { query: string }) {
         const offset = (currentPage - 1) * itemsPerPage
         logger.info(`Searching for: "${query}" (page ${currentPage}, limit ${itemsPerPage}, offset ${offset})`)
 
+        // searchManga now has built-in retry logic
         const data = await searchManga(query, {
           limit: itemsPerPage,
           offset: offset,
@@ -51,8 +54,22 @@ export default function SearchResults({ query }: { query: string }) {
 
         logger.info(`Search results for "${query}": ${data.results.length} items found (total: ${data.total})`)
       } catch (err) {
-        setError(err)
         logger.error(`Error in search results for "${query}"`, err)
+
+        // Set appropriate error based on error type
+        if (err instanceof NetworkError) {
+          setError(err)
+        } else if (err instanceof RateLimitError) {
+          setError(err)
+        } else if (err instanceof TimeoutError) {
+          setError(err)
+        } else if (err instanceof ServerError) {
+          setError(err)
+        } else if (err instanceof ApiError) {
+          setError(err)
+        } else {
+          setError(new Error(`Failed to search for "${query}". Please try again.`))
+        }
       } finally {
         setLoading(false)
       }
@@ -86,12 +103,13 @@ export default function SearchResults({ query }: { query: string }) {
   if (error) {
     return (
       <div className="text-center py-12">
-        <p className="text-red-500 mb-2">Error searching for "{query}"</p>
-        <p className="text-muted-foreground mb-4">Please try again</p>
-        <Button onClick={handleRetry} className="flex items-center gap-2">
-          <RefreshCw className="h-4 w-4" />
-          Retry
-        </Button>
+        <ErrorDisplay
+          error={
+            error instanceof Error ? error : new Error(typeof error === "string" ? error : "An unknown error occurred")
+          }
+          onRetry={handleRetry}
+          className="max-w-2xl mx-auto"
+        />
       </div>
     )
   }
@@ -293,4 +311,3 @@ function SearchResultsSkeleton() {
     </div>
   )
 }
-

@@ -23,13 +23,15 @@ import {
 } from "@/lib/bookmarks"
 import { getMangaReadingProgress, getLastReadChapter, type ReadingProgress } from "@/lib/reading-progress"
 import Link from "next/link"
+import { ErrorDisplay } from "./error-display"
+import { NotFoundError, NetworkError, RateLimitError } from "@/lib/api-error"
 
 export default function MangaDetails({ id }: { id: string }) {
   const { isSignedIn } = useUser()
   const [manga, setManga] = useState<Manga | null>(null)
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | string | null>(null)
   const [retryCount, setRetryCount] = useState(0)
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
@@ -60,10 +62,11 @@ export default function MangaDetails({ id }: { id: string }) {
         logger.info(`Loading manga details for ID: ${id}`)
 
         // Load manga details and chapters in parallel
+        // The API functions now have built-in retry logic
         const [mangaData, chapterList] = await Promise.all([getMangaById(id), getChapterList(id)])
 
         setManga(mangaData)
-        setChapters(chapterList)
+        setChapters(chapterList.chapters)
         setLoading(false)
 
         // If user is signed in, load bookmarks and reading progress
@@ -82,12 +85,25 @@ export default function MangaDetails({ id }: { id: string }) {
             setLastReadChapter(lastRead)
           } catch (err) {
             logger.error("Failed to load user data", err)
+            // Don't set error state for user data failures
+            // This allows the main manga details to still be displayed
           }
         }
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load manga details for ID: ${id}`, err)
-        setError(`Failed to load manga details. ${errorMessage}`)
+
+        // Set appropriate error message based on error type
+        if (err instanceof NotFoundError) {
+          setError(err)
+        } else if (err instanceof NetworkError) {
+          setError(err)
+        } else if (err instanceof RateLimitError) {
+          setError(err)
+        } else {
+          const errorMessage = err instanceof Error ? err.message : "Unknown error"
+          setError(new Error(`Failed to load manga details. ${errorMessage}`))
+        }
+
         setLoading(false)
       }
     }
@@ -217,14 +233,26 @@ export default function MangaDetails({ id }: { id: string }) {
     return <LoginForm onLogin={handleLogin} />
   }
 
+  if (error) {
+    return (
+      <div className="text-center py-12">
+        <ErrorDisplay
+          error={error instanceof Error ? error : new Error(String(error))}
+          onRetry={handleRetry}
+          className="max-w-2xl mx-auto"
+        />
+      </div>
+    )
+  }
+
   if (loading) {
     return <MangaDetailsSkeleton />
   }
 
-  if (error || !manga) {
+  if (!manga) {
     return (
       <div className="text-center py-12">
-        <p className="text-red-500 mb-4">{error || "Failed to load manga details"}</p>
+        <p className="text-red-500 mb-4">{"Failed to load manga details"}</p>
         <Button onClick={handleRetry} className="flex items-center gap-2">
           <RefreshCw className="h-4 w-4" />
           Retry
@@ -358,4 +386,3 @@ function MangaDetailsSkeleton() {
     </div>
   )
 }
-

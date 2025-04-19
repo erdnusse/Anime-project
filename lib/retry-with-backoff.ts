@@ -1,13 +1,32 @@
 import logger from "./logger"
 import connectionManager from "./connection-manager"
+import { ApiError, NetworkError, RateLimitError } from "./api-error"
 
-interface RetryOptions {
+export interface RetryOptions {
   maxRetries: number
   initialDelay: number // in milliseconds
   maxDelay?: number // in milliseconds
   factor?: number // multiplier for each retry
   jitter?: boolean // add randomness to delays
   retryCondition?: (error: any) => boolean // function to determine if error is retryable
+  onRetry?: (attempt: number, error: any) => void // callback on each retry
+}
+
+/**
+ * Default retry options
+ */
+export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+  maxRetries: 3,
+  initialDelay: 1000,
+  maxDelay: 10000,
+  factor: 2,
+  jitter: true,
+  retryCondition: (error) => {
+    // By default, retry on network errors and certain API errors
+    if (error instanceof NetworkError) return true
+    if (error instanceof ApiError && [408, 429, 500, 502, 503, 504].includes(error.status)) return true
+    return false
+  },
 }
 
 /**
@@ -18,17 +37,12 @@ interface RetryOptions {
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  options: RetryOptions,
+  options: Partial<RetryOptions> = {},
   url?: string, // Optional URL for connection management
 ): Promise<T> {
-  const {
-    maxRetries,
-    initialDelay,
-    maxDelay = 30000, // default max delay of 30 seconds
-    factor = 2, // default exponential factor
-    jitter = true, // default to using jitter
-    retryCondition = () => true, // by default, retry on any error
-  } = options
+  // Merge provided options with defaults
+  const config = { ...DEFAULT_RETRY_OPTIONS, ...options }
+  const { maxRetries, initialDelay, maxDelay, factor, jitter, retryCondition, onRetry } = config
 
   let attempt = 0
   let useHttp1Fallback = false
@@ -46,7 +60,7 @@ export async function retryWithBackoff<T>(
     }
 
     try {
-      // Modify the fetch options to use HTTP/1.1 if needed
+      // Execute the function
       const result = await fn()
 
       // Release the connection slot if we acquired one
@@ -76,14 +90,20 @@ export async function retryWithBackoff<T>(
         if (attempt < maxRetries) {
           logger.warn(`HTTP/2 protocol error detected, retrying with HTTP/1.1: ${error.message}`)
           attempt++
+
+          // Call onRetry callback if provided
+          if (onRetry) {
+            onRetry(attempt, error)
+          }
+
           continue
         }
       }
 
       // Special handling for rate limiting (429 Too Many Requests)
-      if (error?.status === 429) {
+      if (error instanceof RateLimitError || error?.status === 429) {
         // Get retry-after header if available, or use a longer default delay
-        const retryAfter = error.retryAfter ? Number.parseInt(error.retryAfter, 10) * 1000 : 5000
+        const retryAfter = error.retryAfter ? Number.parseInt(error.retryAfter.toString(), 10) * 1000 : 5000
         logger.warn(`Rate limited (429). Waiting ${retryAfter / 1000} seconds before retry.`)
 
         // Wait for the specified time
@@ -92,20 +112,35 @@ export async function retryWithBackoff<T>(
         // Retry immediately after waiting
         if (attempt < maxRetries) {
           attempt++
+
+          // Call onRetry callback if provided
+          if (onRetry) {
+            onRetry(attempt, error)
+          }
+
           continue
         }
       }
 
+      // Increment attempt counter
       attempt++
 
       // If we've reached max retries or the error isn't retryable, throw
-      if (attempt >= maxRetries || !retryCondition(error)) {
-        logger.error(`Failed after ${attempt} attempts`, error)
+      if (attempt >= maxRetries || (retryCondition && !retryCondition(error))) {
+        // Enhance error with retry information
+        if (error instanceof Error) {
+          error.message = `Failed after ${attempt} attempts: ${error.message}`
+        }
+
+        logger.error(`Request failed after ${attempt} attempts`, error)
         throw error
       }
 
-      // Calculate delay with exponential backoff
-      let delay = Math.min(initialDelay * Math.pow(factor, attempt - 1), maxDelay)
+      // Calculate delay with exponential backoff using non-null assertion
+      // We know these values exist because we merged with DEFAULT_RETRY_OPTIONS
+      const factorValue = factor ?? 2 // Fallback to 2 if undefined
+      const maxDelayValue = maxDelay ?? 10000 // Fallback to 10000 if undefined
+      let delay = Math.min(initialDelay * Math.pow(factorValue, attempt - 1), maxDelayValue)
 
       // Add jitter if enabled (randomize between 75% and 100% of delay)
       if (jitter) {
@@ -113,6 +148,11 @@ export async function retryWithBackoff<T>(
       }
 
       logger.warn(`Attempt ${attempt} failed, retrying in ${delay}ms`, error)
+
+      // Call onRetry callback if provided
+      if (onRetry) {
+        onRetry(attempt, error)
+      }
 
       // Wait for the calculated delay
       await new Promise((resolve) => setTimeout(resolve, delay))
@@ -128,10 +168,9 @@ export async function retryWithBackoff<T>(
  */
 export function withRetry<T extends (...args: any[]) => Promise<any>>(
   fn: T,
-  options: RetryOptions,
+  options: Partial<RetryOptions> = {},
 ): (...args: Parameters<T>) => Promise<ReturnType<T>> {
   return async (...args: Parameters<T>): Promise<ReturnType<T>> => {
     return retryWithBackoff(() => fn(...args), options)
   }
 }
-

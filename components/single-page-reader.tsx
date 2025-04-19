@@ -29,6 +29,7 @@ import { useLogger } from "@/hooks/use-logger"
 import { useFullscreen } from "@/hooks/use-fullscreen"
 import { ErrorDisplay } from "@/components/error-display"
 import { RateLimitError } from "@/lib/api-error"
+import { NotFoundError } from "@/lib/api-error"
 
 interface SinglePageReaderProps {
   mangaId: string
@@ -178,6 +179,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
         logger.info(`Loading chapter: ${chapterId} for manga: ${mangaId}`)
 
         // Get chapter info and pages in parallel
+        // The API functions now have built-in retry logic
         const [chapter, chapterData, adjacentChapters] = await Promise.all([
           getChapterById(chapterId),
           getChapterPages(chapterId),
@@ -196,7 +198,7 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
 
         if (chapterData.chapter.data.length === 0) {
           logger.error("No pages found in chapter data")
-          setError(new Error("No pages found for this chapter"))
+          setError(new NotFoundError("No pages found for this chapter"))
           setLoading(false)
           return
         }
@@ -230,9 +232,12 @@ export default function SinglePageReader({ mangaId, chapterId }: SinglePageReade
         if (err instanceof RateLimitError && err.retryAfter) {
           setRetryDisabled(true)
           setRetryCountdown(err.retryAfter)
+          setError(err)
+        } else {
+          // For other errors, just set the error state
+          setError(err instanceof Error ? err : new Error("Unknown error occurred"))
         }
 
-        setError(err instanceof Error ? err : new Error("Unknown error occurred"))
         setLoading(false)
       }
     }

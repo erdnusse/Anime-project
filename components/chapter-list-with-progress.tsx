@@ -30,6 +30,8 @@ import {
 } from "@/lib/reading-progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ErrorDisplay } from "@/components/error-display"
+import { NotFoundError, NetworkError, RateLimitError, TimeoutError, ServerError } from "@/lib/api-error"
 
 export default function ChapterListWithProgress({
   mangaId,
@@ -39,7 +41,7 @@ export default function ChapterListWithProgress({
   const { isSignedIn, isLoaded } = useUser()
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | string | null>(null)
   const [retryCount, setRetryCount] = useState(0)
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
@@ -88,9 +90,24 @@ export default function ChapterListWithProgress({
         setIsLoadingMore(false)
         setIsForcingRefresh(false) // Reset the force refresh flag
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : "Unknown error"
         logger.error(`Failed to load chapters for manga ID: ${mangaId}`, err)
-        setError(`Failed to load chapters. ${errorMessage}`)
+
+        // Set appropriate error based on error type
+        if (err instanceof NotFoundError) {
+          setError(err)
+        } else if (err instanceof NetworkError) {
+          setError(err)
+        } else if (err instanceof RateLimitError) {
+          setError(err)
+        } else if (err instanceof TimeoutError) {
+          setError(err)
+        } else if (err instanceof ServerError) {
+          setError(err)
+        } else {
+          const errorMessage = err instanceof Error ? err.message : "Unknown error"
+          setError(new Error(`Failed to load chapters. ${errorMessage}`))
+        }
+
         setLoading(false)
         setIsLoadingMore(false)
         setIsForcingRefresh(false) // Reset the force refresh flag
@@ -110,7 +127,7 @@ export default function ChapterListWithProgress({
         const history = await getMangaReadingProgress(mangaId)
         setReadingHistory(history)
       } catch (err) {
-        logger.error(`Failed to load reading history for manga ID: ${mangaId}`, err)
+        logger.error(`Failed toload reading history for manga ID: ${mangaId}`, err)
       } finally {
         setIsLoadingReadingHistory(false)
       }
@@ -196,11 +213,11 @@ export default function ChapterListWithProgress({
   if (error) {
     return (
       <div className="text-center py-12">
-        <p className="text-red-500 mb-4">{error}</p>
-        <Button onClick={handleRetry} className="flex items-center gap-2">
-          <RefreshCw className="h-4 w-4" />
-          Retry
-        </Button>
+        <ErrorDisplay
+          error={error instanceof Error ? error : new Error(String(error))}
+          onRetry={handleRetry}
+          className="max-w-2xl mx-auto"
+        />
       </div>
     )
   }
@@ -398,4 +415,3 @@ function ChapterListSkeleton() {
     </div>
   )
 }
-
