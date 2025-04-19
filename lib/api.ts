@@ -562,53 +562,48 @@ export async function getChapterList(
   }
 }
 
-// Update the getAdjacentChapters function to work with the new pagination
 export async function getAdjacentChapters(
   mangaId: string,
   currentChapterId: string,
-): Promise<{
-  prev: Chapter | null
-  next: Chapter | null
-}> {
+): Promise<{ prev: Chapter | null; next: Chapter | null }> {
   try {
     logger.info(`Finding adjacent chapters for chapter ID: ${currentChapterId}`)
 
     // First, get the current chapter to find its number
     const currentChapter = await getChapterById(currentChapterId)
-    const currentChapterNumber = currentChapter.attributes.chapter
-      ? Number.parseFloat(currentChapter.attributes.chapter)
-      : 0
+    const currentChapterNumber = currentChapter.attributes.chapter ? Number.parseFloat(currentChapter.attributes.chapter) : 0
 
-    // Find the previous chapter (higher number)
-    const prevChapterData = await apiRequest<any>(
-      `/manga/${mangaId}/feed`,
-      {
-        translatedLanguage: ["en"],
-        order: { chapter: "asc" },
-        limit: 1,
-        offset: 0,
-        // Find chapters with higher number
-        chapter: [currentChapterNumber.toString(), "gt"],
-      },
-      "GET",
-    )
+    // Fetch all chapters for the manga
+    const allChaptersData = await apiRequest<any>(`/manga/${mangaId}/feed`, {
+      translatedLanguage: ["en"],
+      order: { chapter: "asc" },
+      limit: 500,
+    }, "GET")
 
-    // Find the next chapter (lower number)
-    const nextChapterData = await apiRequest<any>(
-      `/manga/${mangaId}/feed`,
-      {
-        translatedLanguage: ["en"],
-        order: { chapter: "desc" },
-        limit: 1,
-        offset: 0,
-        // Find chapters with lower number
-        chapter: [currentChapterNumber.toString(), "lt"],
-      },
-      "GET",
-    )
+    const allChapters: Chapter[] = allChaptersData.data;
+    if (!allChapters) {
+      logger.error(`No chapters found for manga ID: ${mangaId}`);
+      return { prev: null, next: null };
+    }
+    // Sort chapters by chapter number in ascending order
+    allChapters.sort((a, b) => {
+      const aNum = a.attributes.chapter ? Number.parseFloat(a.attributes.chapter) : 0;
+      const bNum = b.attributes.chapter ? Number.parseFloat(b.attributes.chapter) : 0;
+      return aNum - bNum; // Ascending order
+    });
 
-    const prev = prevChapterData.data.length > 0 ? prevChapterData.data[0] : null
-    const next = nextChapterData.data.length > 0 ? nextChapterData.data[0] : null
+    // Find the index of the current chapter in the sorted array
+    const currentChapterIndex = allChapters.findIndex((chapter) => chapter.id === currentChapterId);
+
+    if (currentChapterIndex === -1) {
+      logger.error(`Current chapter ID ${currentChapterId} not found in chapter list`);
+      return { prev: null, next: null };
+    }
+
+    // Determine the previous and next chapters
+    const prev = currentChapterIndex > 0 ? allChapters[currentChapterIndex - 1] : null;
+    const next = currentChapterIndex < allChapters.length - 1 ? allChapters[currentChapterIndex + 1] : null;
+
 
     logger.debug(`Adjacent chapters for chapter ID ${currentChapterId}`, {
       prevId: prev?.id,
